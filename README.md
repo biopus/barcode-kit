@@ -93,9 +93,19 @@ uv run barcode-kit build --genus Iris --marker rbcl --outdir ./out
 ```bash
 uv run barcode-kit build --genus Iris --marker rbcl \
   --min-length 500 \
-  --max-n-content 0.05 \
+  --max-ambiguous-content 0.05 \
   --exclude-hybrid \
   --exclude-uncertain \
+  --outdir ./out
+```
+
+如需在构建后用 TreeShrink 去除长枝异常序列，可显式开启系统发育质控。使用前需确保 `mafft`、`iqtree` 和 `run_treeshrink.py` 已安装并可在 `PATH` 中找到：
+
+```bash
+uv run barcode-kit build --genus Iris --marker rbcl \
+  --tree-shrink-qc \
+  --tree-shrink-qc-threads 4 \
+  --tree-shrink-qc-quantile 0.05 \
   --outdir ./out
 ```
 
@@ -103,6 +113,48 @@ uv run barcode-kit build --genus Iris --marker rbcl \
 
 - `<marker>.fasta`：构建出的 FASTA 数据集。
 - `build_report.json`：每条候选记录的纳入状态、排除原因和质量指标。
+
+### 系统发育分析 Python API
+
+`barcode_kit.phylogeny` 提供外部工具封装接口，可在 Python 流程中调用多序列比对、trimAl 裁剪、系统发育树构建和 TreeShrink 长枝异常序列识别。使用前需确保对应命令已安装并可在 `PATH` 中找到，例如 `mafft`、`iqtree`、`trimal` 和 `run_treeshrink.py`。
+
+```python
+from pathlib import Path
+
+from barcode_kit.phylogeny import (
+    AlignmentProgram,
+    SubprocessAlignmentRunner,
+    SubprocessTreeRunner,
+    SubprocessTreeShrinkRunner,
+    SubprocessTrimalRunner,
+    TreeProgram,
+    run_tree_shrink_qc,
+)
+
+aligned = SubprocessAlignmentRunner().align(
+    Path("rbcl.fasta"),
+    Path("rbcl.aligned.fasta"),
+    program=AlignmentProgram.MAFFT,
+    threads=4,
+)
+trimmed = SubprocessTrimalRunner().trim(aligned, Path("rbcl.trimmed.fasta"))
+SubprocessTreeRunner().build_tree(
+    trimmed,
+    Path("rbcl.tree"),
+    program=TreeProgram.FASTTREE,
+    bootstrap=1000,
+)
+
+run_tree_shrink_qc(
+    Path("rbcl.fasta"),
+    Path("rbcl.filtered.fasta"),
+    Path("treeshrink-qc"),
+    threads=4,
+    tree_shrink_runner=SubprocessTreeShrinkRunner(),
+)
+```
+
+`build_dataset()` 也可以显式开启 TreeShrink 质控。开启后会先输出候选 FASTA 到临时工作目录，依次运行 MAFFT、IQ-TREE 和 TreeShrink，再把 TreeShrink 标记的异常序列从最终 `<marker>.fasta` 中删除，并在 `build_report.json` 中记录排除原因。
 
 ### 查看本地缓存
 

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
 from Bio.Seq import Seq
@@ -30,6 +30,14 @@ from barcode_kit.parser import (
     format_fasta_record,
     read_single_genbank,
 )
+from barcode_kit.phylogeny import (
+    AlignmentRunner,
+    TreeRunner,
+    TreeShrinkQcConfig,
+    TreeShrinkQcResult,
+    TreeShrinkRunner,
+    run_tree_shrink_qc,
+)
 from barcode_kit.storage import Storage
 from barcode_kit.validation import sequence_quality
 
@@ -42,13 +50,17 @@ def build_dataset(
     outdir: Path,
     *,
     min_length: int | None = None,
-    max_n_content: float | None = None,
+    max_ambiguous_content: float | None = None,
     exclude_hybrid: bool = False,
     exclude_uncertain: bool = False,
     its_extraction_mode: ItsExtractionMode = ItsExtractionMode.HMM_BLAST,
     itsxrust_runner: ItsxrustRunner | None = None,
     its_hmm_path: Path | None = None,
     blast_runner: BlastRunner | None = None,
+    tree_shrink_qc: TreeShrinkQcConfig | None = None,
+    alignment_runner: AlignmentRunner | None = None,
+    tree_runner: TreeRunner | None = None,
+    tree_shrink_runner: TreeShrinkRunner | None = None,
 ) -> list[BuildReportEntry]:
     ensure_app_dirs(config)
     storage.initialize()
@@ -57,8 +69,8 @@ def build_dataset(
     if not candidates:
         raise BuildError(f"no cached {marker.value} records found for {query.rank} {query.name}")
 
-    fasta_chunks: list[str] = []
     report: list[BuildReportEntry] = []
+    fasta_sequences: dict[int, Seq] = {}
     itsxrust_runner = itsxrust_runner or SubprocessItsxrustRunner(config=config.itsxrust)
     its_hmm_path = its_hmm_path or default_hmm_path()
     blast_runner = blast_runner or SubprocessBlastRunner(config.blast_rescue)
@@ -73,19 +85,23 @@ def build_dataset(
             its_extraction_mode,
             outdir,
             min_length,
-            max_n_content,
+            max_ambiguous_content,
             exclude_hybrid,
             exclude_uncertain,
             itsxrust_runner,
             its_hmm_path,
             blast_runner,
+            tree_shrink_qc,
+            alignment_runner,
+            tree_runner,
+            tree_shrink_runner,
         )
 
-    for cache_record, taxonomy in candidates:
+    for index, (cache_record, taxonomy) in enumerate(candidates):
         path = config.genbank_cache_dir / f"{cache_record.accession_version}.gb"
         reason: str | None = None
         quality: SequenceQuality | None = None
-        sequence = None
+        sequence: Seq | None = None
         metadata: dict[str, str | int | float | bool | None] = {
             "taxon_id": taxonomy.taxon_id,
             "marker": marker.value,
@@ -122,32 +138,34 @@ def build_dataset(
             if reason is None and sequence is None:
                 reason = "marker not extracted"
             if reason is None and sequence is not None:
-                quality = sequence_quality(sequence, marker)
-                reason = _filter_reason(quality, marker, min_length, max_n_content)
+                quality, reason = _quality_filter_reason(
+                    sequence,
+                    min_length,
+                    max_ambiguous_content,
+                )
 
-        included = reason is None and sequence is not None
-        output_id = None
-        if included:
-            output_id = _fasta_id(cache_record.accession_version, taxonomy.scientific_name)
-            fasta_chunks.append(format_fasta_record(output_id, sequence))
-        report.append(
-            BuildReportEntry(
-                accession_version=cache_record.accession_version,
-                scientific_name=taxonomy.scientific_name,
-                included=included,
-                reason=reason,
-                quality=quality,
-                output_id=output_id,
-                metadata=metadata,
-            )
+        entry = _make_report_entry(
+            cache_record.accession_version,
+            taxonomy.scientific_name,
+            sequence,
+            reason,
+            quality,
+            metadata,
         )
+        report.append(entry)
+        if entry.included and sequence is not None:
+            fasta_sequences[index] = sequence
 
-    (outdir / f"{marker.value}.fasta").write_text("".join(fasta_chunks), encoding="utf-8")
-    (outdir / "build_report.json").write_text(
-        json.dumps([asdict(entry) for entry in report], ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
+    return _finalize_build_outputs(
+        outdir,
+        marker,
+        report,
+        fasta_sequences,
+        tree_shrink_qc,
+        alignment_runner,
+        tree_runner,
+        tree_shrink_runner,
     )
-    return report
 
 
 @dataclass(frozen=True)
@@ -166,12 +184,16 @@ def _build_its_hmm_blast_dataset(
     extraction_mode: ItsExtractionMode,
     outdir: Path,
     min_length: int | None,
-    max_n_content: float | None,
+    max_ambiguous_content: float | None,
     exclude_hybrid: bool,
     exclude_uncertain: bool,
     itsxrust_runner: ItsxrustRunner,
     hmm_path: Path,
     blast_runner: BlastRunner,
+    tree_shrink_qc: TreeShrinkQcConfig | None,
+    alignment_runner: AlignmentRunner | None,
+    tree_runner: TreeRunner | None,
+    tree_shrink_runner: TreeShrinkRunner | None,
 ) -> list[BuildReportEntry]:
     report_slots: list[BuildReportEntry | None] = []
     fasta_sequences: dict[int, Seq] = {}
@@ -192,8 +214,6 @@ def _build_its_hmm_blast_dataset(
         }
 
         reason: str | None = None
-        quality: SequenceQuality | None = None
-        sequence: Seq | None = None
         if exclude_hybrid and taxonomy.is_hybrid:
             reason = "hybrid excluded"
         elif exclude_uncertain and taxonomy.is_uncertain:
@@ -227,24 +247,14 @@ def _build_its_hmm_blast_dataset(
             except Exception as error:
                 reason = f"GenBank parse failed: {error}"
 
-        if reason is None and sequence is None:
-            reason = "marker not extracted"
-        if reason is None and sequence is not None:
-            quality = sequence_quality(sequence, marker)
-            reason = _filter_reason(quality, marker, min_length, max_n_content)
-            if reason is None:
-                seeds.append(BlastSeed(accession_version=accession_version, sequence=sequence))
-        entry = _make_report_entry(
+        report_slots[index] = _make_report_entry(
             accession_version,
             taxonomy.scientific_name,
-            sequence,
+            None,
             reason,
-            quality,
+            None,
             metadata,
         )
-        report_slots[index] = entry
-        if entry.included and sequence is not None:
-            fasta_sequences[index] = sequence
 
     if itsxrust_records:
         hmm_results = itsxrust_runner.extract_many(
@@ -273,8 +283,11 @@ def _build_its_hmm_blast_dataset(
             if sequence is not None:
                 metadata["extraction_backend"] = "itsxrust"
                 metadata["fallback_reason"] = None
-                quality = sequence_quality(sequence, marker)
-                reason = _filter_reason(quality, marker, min_length, max_n_content)
+                quality, reason = _quality_filter_reason(
+                    sequence,
+                    min_length,
+                    max_ambiguous_content,
+                )
                 if reason is None:
                     seeds.append(BlastSeed(accession_version=item.accession_version, sequence=sequence))
             else:
@@ -321,8 +334,11 @@ def _build_its_hmm_blast_dataset(
             if result.sequence is None:
                 reason = "marker not extracted"
             else:
-                quality = sequence_quality(result.sequence, marker)
-                reason = _filter_reason(quality, marker, min_length, max_n_content)
+                quality, reason = _quality_filter_reason(
+                    result.sequence,
+                    min_length,
+                    max_ambiguous_content,
+                )
             entry = _make_report_entry(
                 item.accession_version,
                 item.scientific_name,
@@ -336,17 +352,16 @@ def _build_its_hmm_blast_dataset(
                 fasta_sequences[item.index] = result.sequence
 
     report = [entry for entry in report_slots if entry is not None]
-    fasta_chunks = [
-        format_fasta_record(entry.output_id, fasta_sequences[index])
-        for index, entry in enumerate(report_slots)
-        if entry is not None and entry.included and entry.output_id is not None
-    ]
-    (outdir / f"{marker.value}.fasta").write_text("".join(fasta_chunks), encoding="utf-8")
-    (outdir / "build_report.json").write_text(
-        json.dumps([asdict(entry) for entry in report], ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
+    return _finalize_build_outputs(
+        outdir,
+        marker,
+        report,
+        fasta_sequences,
+        tree_shrink_qc,
+        alignment_runner,
+        tree_runner,
+        tree_shrink_runner,
     )
-    return report
 
 
 def _blast_rescue_pending_records(
@@ -397,6 +412,103 @@ def _make_report_entry(
     )
 
 
+def _quality_filter_reason(
+    sequence: Seq,
+    min_length: int | None,
+    max_ambiguous_content: float | None,
+) -> tuple[SequenceQuality, str | None]:
+    quality = sequence_quality(sequence)
+    return quality, _filter_reason(quality, min_length, max_ambiguous_content)
+
+
+def _write_build_outputs(
+    outdir: Path,
+    marker: Marker,
+    report: list[BuildReportEntry],
+    fasta_chunks: list[str],
+) -> None:
+    (outdir / f"{marker.value}.fasta").write_text("".join(fasta_chunks), encoding="utf-8")
+    (outdir / "build_report.json").write_text(
+        json.dumps([asdict(entry) for entry in report], ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+
+def _finalize_build_outputs(
+    outdir: Path,
+    marker: Marker,
+    report: list[BuildReportEntry],
+    fasta_sequences: dict[int, Seq],
+    tree_shrink_qc: TreeShrinkQcConfig | None,
+    alignment_runner: AlignmentRunner | None,
+    tree_runner: TreeRunner | None,
+    tree_shrink_runner: TreeShrinkRunner | None,
+) -> list[BuildReportEntry]:
+    fasta_chunks = [
+        format_fasta_record(entry.output_id, fasta_sequences[index])
+        for index, entry in enumerate(report)
+        if entry.included and entry.output_id is not None and index in fasta_sequences
+    ]
+    if tree_shrink_qc is None or not fasta_chunks:
+        _write_build_outputs(outdir, marker, report, fasta_chunks)
+        return report
+
+    workdir = outdir / "treeshrink_qc"
+    input_fasta = workdir / "input.fasta"
+    input_fasta.parent.mkdir(parents=True, exist_ok=True)
+    input_fasta.write_text("".join(fasta_chunks), encoding="utf-8")
+    qc_result = run_tree_shrink_qc(
+        input_fasta,
+        outdir / f"{marker.value}.fasta",
+        workdir,
+        threads=tree_shrink_qc.threads,
+        quantile=tree_shrink_qc.quantile,
+        alignment_runner=alignment_runner,
+        tree_runner=tree_runner,
+        tree_shrink_runner=tree_shrink_runner,
+    )
+    updated_report = _mark_tree_shrink_outliers(report, qc_result)
+    _write_build_report(outdir, updated_report)
+    return updated_report
+
+
+def _mark_tree_shrink_outliers(
+    report: list[BuildReportEntry],
+    qc_result: TreeShrinkQcResult,
+) -> list[BuildReportEntry]:
+    updated_report: list[BuildReportEntry] = []
+    for entry in report:
+        if entry.included and entry.output_id in qc_result.removed_taxa:
+            metadata = dict(entry.metadata)
+            metadata.update(
+                {
+                    "tree_shrink_alignment": str(qc_result.alignment_path),
+                    "tree_shrink_tree": str(qc_result.tree_path),
+                    "tree_shrink_output_dir": str(qc_result.tree_shrink_output_dir),
+                    "tree_shrink_removed_taxa": str(qc_result.removed_taxa_path),
+                }
+            )
+            updated_report.append(
+                replace(
+                    entry,
+                    included=False,
+                    reason="TreeShrink long-branch outlier",
+                    output_id=None,
+                    metadata=metadata,
+                )
+            )
+        else:
+            updated_report.append(entry)
+    return updated_report
+
+
+def _write_build_report(outdir: Path, report: list[BuildReportEntry]) -> None:
+    (outdir / "build_report.json").write_text(
+        json.dumps([asdict(entry) for entry in report], ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+
 def _hmm_fallback_reason(marker: Marker, result: ItsxrustExtractionResult) -> str:
     if result.fallback_reason is not None:
         return result.fallback_reason
@@ -405,20 +517,13 @@ def _hmm_fallback_reason(marker: Marker, result: ItsxrustExtractionResult) -> st
 
 def _filter_reason(
     quality: SequenceQuality,
-    marker: Marker,
     min_length: int | None,
-    max_n_content: float | None,
+    max_ambiguous_content: float | None,
 ) -> str | None:
     if min_length is not None and quality.length < min_length:
         return "sequence shorter than min_length"
-    if max_n_content is not None and quality.n_content > max_n_content:
-        return "N content above max_n_content"
-    if not marker.is_coding:
-        return None
-    if quality.has_stop_codon:
-        return "coding sequence contains stop codon"
-    if quality.has_frameshift:
-        return "coding sequence length is not divisible by 3"
+    if max_ambiguous_content is not None and quality.ambiguous_content > max_ambiguous_content:
+        return "ambiguous base content above max_ambiguous_content"
     return None
 
 

@@ -17,6 +17,7 @@ from barcode_kit.builder import build_dataset
 from barcode_kit.exceptions import BarcodeKitError
 from barcode_kit.genbank import SyncService
 from barcode_kit.models import ItsExtractionMode, Marker, TaxonQuery
+from barcode_kit.phylogeny import TreeShrinkQcConfig
 from barcode_kit.storage import Storage
 from barcode_kit.taxonomy import ETETaxonomyResolver
 
@@ -58,13 +59,28 @@ def build(
     genus: GenusOption = None,
     species: SpeciesOption = None,
     min_length: Annotated[int | None, typer.Option("--min-length")] = None,
-    max_n_content: Annotated[float | None, typer.Option("--max-n-content")] = None,
+    max_ambiguous_content: Annotated[
+        float | None,
+        typer.Option("--max-ambiguous-content"),
+    ] = None,
     exclude_hybrid: Annotated[bool, typer.Option("--exclude-hybrid")] = False,
     exclude_uncertain: Annotated[bool, typer.Option("--exclude-uncertain")] = False,
     its_extraction_mode: Annotated[
         ItsExtractionMode,
         typer.Option("--its-extraction-mode", case_sensitive=False),
     ] = ItsExtractionMode.HMM_BLAST,
+    tree_shrink_qc: Annotated[
+        bool,
+        typer.Option("--tree-shrink-qc", help="Run MAFFT, IQ-TREE, and TreeShrink long-branch QC."),
+    ] = False,
+    tree_shrink_qc_threads: Annotated[
+        int,
+        typer.Option("--tree-shrink-qc-threads", help="Threads for MAFFT and IQ-TREE in TreeShrink QC."),
+    ] = 1,
+    tree_shrink_qc_quantile: Annotated[
+        float,
+        typer.Option("--tree-shrink-qc-quantile", help="TreeShrink false positive tolerance quantile."),
+    ] = 0.05,
 ) -> None:
     """Build a FASTA dataset from the local cache."""
     _run_user_command(
@@ -75,10 +91,13 @@ def build(
             genus,
             species,
             min_length,
-            max_n_content,
+            max_ambiguous_content,
             exclude_hybrid,
             exclude_uncertain,
             its_extraction_mode,
+            tree_shrink_qc,
+            tree_shrink_qc_threads,
+            tree_shrink_qc_quantile,
         )
     )
 
@@ -280,10 +299,13 @@ def _build(
     genus: str | None,
     species: str | None,
     min_length: int | None,
-    max_n_content: float | None,
+    max_ambiguous_content: float | None,
     exclude_hybrid: bool,
     exclude_uncertain: bool,
     its_extraction_mode: ItsExtractionMode,
+    tree_shrink_qc: bool,
+    tree_shrink_qc_threads: int,
+    tree_shrink_qc_quantile: float,
 ) -> None:
     query = _taxon_query(family, genus, species)
     config = config_module.load_or_create_config()
@@ -295,10 +317,18 @@ def _build(
         marker,
         outdir,
         min_length=min_length,
-        max_n_content=max_n_content,
+        max_ambiguous_content=max_ambiguous_content,
         exclude_hybrid=exclude_hybrid,
         exclude_uncertain=exclude_uncertain,
         its_extraction_mode=its_extraction_mode,
+        tree_shrink_qc=(
+            TreeShrinkQcConfig(
+                threads=tree_shrink_qc_threads,
+                quantile=tree_shrink_qc_quantile,
+            )
+            if tree_shrink_qc
+            else None
+        ),
     )
     included = sum(1 for entry in report if entry.included)
     typer.echo(

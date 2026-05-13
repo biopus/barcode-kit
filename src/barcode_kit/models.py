@@ -82,9 +82,7 @@ class GenBankCacheRecord:
 class SequenceQuality:
     length: int
     gc_content: float
-    n_content: float
-    has_stop_codon: bool | None = None
-    has_frameshift: bool | None = None
+    ambiguous_content: float
 
 
 @dataclass(frozen=True)

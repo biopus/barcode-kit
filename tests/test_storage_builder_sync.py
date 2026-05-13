@@ -15,6 +15,7 @@ from barcode_kit.genbank import DownloadItem, DownloadReport, SyncService
 from barcode_kit.blast import BlastRescueResult, BlastSeed
 from barcode_kit.itsxrust import ItsxrustExtractionResult
 from barcode_kit.models import GenBankCacheRecord, ItsExtractionMode, Marker, TaxonQuery, TaxonomyRecord
+from barcode_kit.phylogeny import AlignmentProgram, TreeProgram, TreeShrinkQcConfig, TreeShrinkResult
 from barcode_kit.storage import Storage
 
 
@@ -125,13 +126,105 @@ def test_build_dataset_exports_fasta_and_report(tmp_path: Path, genbank_text):
         Marker.RBCL,
         outdir,
         min_length=500,
-        max_n_content=0.05,
+        max_ambiguous_content=0.05,
     )
 
     assert len(report) == 1
     assert report[0].included is True
     assert "PP476489.4|Iris_japonica" in (outdir / "rbcl.fasta").read_text()
     assert (outdir / "build_report.json").exists()
+
+
+def test_build_dataset_excludes_records_above_max_ambiguous_content(
+    tmp_path: Path,
+    genbank_text,
+):
+    config = _config(tmp_path)
+    storage = Storage(config.database_path)
+    service = SyncService(
+        config,
+        storage,
+        FakeResolver(),
+        FakeClient({"AMB000001.1": genbank_text(accession="AMB000001", version=1, sequence="ACGTNNRY")}),
+    )
+    service.sync(TaxonQuery("genus", "Iris"), Marker.RBCL)
+
+    report = build_dataset(
+        config,
+        storage,
+        TaxonQuery("genus", "Iris"),
+        Marker.RBCL,
+        tmp_path / "out",
+        max_ambiguous_content=0.25,
+    )
+
+    assert len(report) == 1
+    assert report[0].included is False
+    assert report[0].reason == "ambiguous base content above max_ambiguous_content"
+    assert report[0].quality is not None
+    assert report[0].quality.ambiguous_content == 0.5
+
+
+def test_build_dataset_can_remove_treeshrink_long_branch_outliers(
+    tmp_path: Path,
+    genbank_text,
+):
+    config = _config(tmp_path)
+    storage = Storage(config.database_path)
+    service = SyncService(
+        config,
+        storage,
+        FakeResolver(),
+        FakeClient(
+            {
+                "PP476489.4": genbank_text(),
+                "PP476490.1": genbank_text(accession="PP476490", version=1),
+            }
+        ),
+    )
+    service.sync(TaxonQuery("genus", "Iris"), Marker.RBCL)
+    alignment_runner = FakeAlignmentRunner()
+    tree_runner = FakeTreeRunner()
+    tree_shrink_runner = FakeTreeShrinkRunner({"PP476490.1|Iris_japonica"})
+
+    report = build_dataset(
+        config,
+        storage,
+        TaxonQuery("genus", "Iris"),
+        Marker.RBCL,
+        tmp_path / "out",
+        tree_shrink_qc=TreeShrinkQcConfig(threads=4),
+        alignment_runner=alignment_runner,
+        tree_runner=tree_runner,
+        tree_shrink_runner=tree_shrink_runner,
+    )
+
+    assert len(report) == 2
+    assert report[0].included is True
+    assert report[1].included is False
+    assert report[1].reason == "TreeShrink long-branch outlier"
+    assert report[1].metadata["tree_shrink_removed_taxa"] == str(
+        tmp_path / "out" / "treeshrink_qc" / "treeshrink" / "output.txt"
+    )
+    fasta_text = (tmp_path / "out" / "rbcl.fasta").read_text(encoding="utf-8")
+    assert "PP476489.4|Iris_japonica" in fasta_text
+    assert "PP476490.1|Iris_japonica" not in fasta_text
+    assert alignment_runner.calls == [
+        (
+            tmp_path / "out" / "treeshrink_qc" / "input.fasta",
+            tmp_path / "out" / "treeshrink_qc" / "mafft.fasta",
+            AlignmentProgram.MAFFT,
+            4,
+        )
+    ]
+    assert tree_runner.calls == [
+        (
+            tmp_path / "out" / "treeshrink_qc" / "mafft.fasta",
+            tmp_path / "out" / "treeshrink_qc" / "iqtree.tree",
+            TreeProgram.IQTREE,
+            4,
+        )
+    ]
 
 
 def test_build_its_annotation_mode_excludes_its2_only_record_even_if_cache_flag_is_stale(
@@ -481,6 +574,46 @@ class FakeBlastRunner:
             )
             for record in failed_records
         }
+
+
+class FakeAlignmentRunner:
+    def __init__(self):
+        self.calls = []
+
+    def align(self, input_path, output_path, *, program, threads):
+        input_path = Path(input_path)
+        output_path = Path(output_path)
+        self.calls.append((input_path, output_path, program, threads))
+        output_path.write_text(input_path.read_text(encoding="utf-8"), encoding="utf-8")
+        return output_path
+
+
+class FakeTreeRunner:
+    def __init__(self):
+        self.calls = []
+
+    def build_tree(self, input_path, output_path, *, program, threads):
+        input_path = Path(input_path)
+        output_path = Path(output_path)
+        self.calls.append((input_path, output_path, program, threads))
+        output_path.write_text("(PP476489.4|Iris_japonica:0.1,PP476490.1|Iris_japonica:1.5);\n", encoding="utf-8")
+        return output_path
+
+
+class FakeTreeShrinkRunner:
+    def __init__(self, removed_taxa: set[str]):
+        self.removed_taxa = removed_taxa
+
+    def detect_outliers(self, tree_path, output_dir, *, output_prefix="output", quantile=0.05):
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        removed_path = output_dir / f"{output_prefix}.txt"
+        removed_path.write_text("\t".join(sorted(self.removed_taxa)) + "\n", encoding="utf-8")
+        return TreeShrinkResult(
+            removed_taxa=self.removed_taxa,
+            output_dir=output_dir,
+            removed_taxa_path=removed_path,
+        )
 
 
 def _insert_cached_record(

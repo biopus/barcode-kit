@@ -30,10 +30,19 @@ def test_parse_genbank_and_extract_rbcl(genbank_text):
     assert parsed.marker_flags[Marker.RBCL] is True
     sequence = extract_marker(parsed.record, Marker.RBCL)
     assert sequence is not None
-    quality = sequence_quality(sequence, Marker.RBCL)
+    quality = sequence_quality(sequence)
     assert quality.length == 600
-    assert quality.has_frameshift is False
-    assert quality.has_stop_codon is False
+    assert quality.ambiguous_content == 0.0
+
+
+def test_sequence_quality_counts_non_canonical_bases_as_ambiguous():
+    quality = sequence_quality(Seq("ACGTNRYS"))
+
+    assert quality.length == 8
+    assert quality.gc_content == 0.5
+    assert quality.ambiguous_content == 0.5
+    assert not hasattr(quality, "has_stop_codon")
+    assert not hasattr(quality, "has_frameshift")
 
 
 def test_complete_its_single_feature_sets_flags_and_extracts_full_its():

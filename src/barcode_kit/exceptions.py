@@ -35,3 +35,7 @@ class TaxonomyError(BarcodeKitError):
 
 class BuildError(BarcodeKitError):
     """Raised when a dataset cannot be built."""
+
+
+class PhylogenyError(BarcodeKitError):
+    """Raised when alignment, trimming, or tree reconstruction fails."""
