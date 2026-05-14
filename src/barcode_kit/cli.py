@@ -73,14 +73,6 @@ def build(
         bool,
         typer.Option("--tree-shrink-qc", help="Run MAFFT, IQ-TREE, and TreeShrink long-branch QC."),
     ] = False,
-    tree_shrink_qc_threads: Annotated[
-        int,
-        typer.Option("--tree-shrink-qc-threads", help="Threads for MAFFT and IQ-TREE in TreeShrink QC."),
-    ] = 1,
-    tree_shrink_qc_quantile: Annotated[
-        float,
-        typer.Option("--tree-shrink-qc-quantile", help="TreeShrink false positive tolerance quantile."),
-    ] = 0.05,
 ) -> None:
     """Build a FASTA dataset from the local cache."""
     _run_user_command(
@@ -96,8 +88,6 @@ def build(
             exclude_uncertain,
             its_extraction_mode,
             tree_shrink_qc,
-            tree_shrink_qc_threads,
-            tree_shrink_qc_quantile,
         )
     )
 
@@ -304,8 +294,6 @@ def _build(
     exclude_uncertain: bool,
     its_extraction_mode: ItsExtractionMode,
     tree_shrink_qc: bool,
-    tree_shrink_qc_threads: int,
-    tree_shrink_qc_quantile: float,
 ) -> None:
     query = _taxon_query(family, genus, species)
     config = config_module.load_or_create_config()
@@ -323,8 +311,9 @@ def _build(
         its_extraction_mode=its_extraction_mode,
         tree_shrink_qc=(
             TreeShrinkQcConfig(
-                threads=tree_shrink_qc_threads,
-                quantile=tree_shrink_qc_quantile,
+                quantile=config.tree_shrink_qc.quantile,
+                bootstrap=config.tree_shrink_qc.bootstrap,
+                max_removed=config.tree_shrink_qc.max_removed,
             )
             if tree_shrink_qc
             else None

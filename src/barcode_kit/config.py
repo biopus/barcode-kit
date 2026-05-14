@@ -50,6 +50,11 @@ DEFAULT_CONFIG = {
                 "max_query_length_ratio": 1.15,
             },
         },
+        "tree_shrink_qc": {
+            "quantile": 0.1,
+            "bootstrap": 0,
+            "max_removed": "auto-select",
+        },
     },
 }
 
@@ -98,6 +103,13 @@ class ItsxrustConfig:
 
 
 @dataclass(frozen=True)
+class TreeShrinkBuildConfig:
+    quantile: float = 0.05
+    bootstrap: int = 0
+    max_removed: int | None = None
+
+
+@dataclass(frozen=True)
 class AppConfig:
     data_dir: Path
     batch_size: int
@@ -108,6 +120,7 @@ class AppConfig:
     genbank_api_key: str | None = None
     blast_rescue: BlastRescueConfig = field(default_factory=BlastRescueConfig)
     itsxrust: ItsxrustConfig = field(default_factory=ItsxrustConfig)
+    tree_shrink_qc: TreeShrinkBuildConfig = field(default_factory=TreeShrinkBuildConfig)
 
     @property
     def database_path(self) -> Path:
@@ -199,6 +212,9 @@ def set_config_value(key: str, value: str, path: Path | None = None) -> AppConfi
         ("build", "blast_rescue", "its2", "min_identity"),
         ("build", "blast_rescue", "its2", "min_query_length_ratio"),
         ("build", "blast_rescue", "its2", "max_query_length_ratio"),
+        ("build", "tree_shrink_qc", "quantile"),
+        ("build", "tree_shrink_qc", "bootstrap"),
+        ("build", "tree_shrink_qc", "max_removed"),
     }:
         raise ConfigError(f"unknown config key: {key}")
     if parts[0] == "genbank":
@@ -244,6 +260,13 @@ def config_as_dict(config: AppConfig) -> dict[str, Any]:
                 "its": _blast_marker_config_as_dict(config.blast_rescue.its),
                 "its2": _blast_marker_config_as_dict(config.blast_rescue.its2),
             },
+            "tree_shrink_qc": {
+                "quantile": config.tree_shrink_qc.quantile,
+                "bootstrap": config.tree_shrink_qc.bootstrap,
+                "max_removed": _tree_shrink_max_removed_as_config_value(
+                    config.tree_shrink_qc.max_removed
+                ),
+            },
         },
     }
 
@@ -262,6 +285,7 @@ def _parse_config(raw: dict[str, Any]) -> AppConfig:
     build = raw.get("build", {})
     itsxrust = build.get("itsxrust", {})
     blast_rescue = build.get("blast_rescue", {})
+    tree_shrink_qc = build.get("tree_shrink_qc", {})
     return AppConfig(
         data_dir=Path(str(paths.get("data_dir") or DEFAULT_DATA_DIR)).expanduser(),
         batch_size=int(collectors.get("batch_size", 500)),
@@ -272,10 +296,16 @@ def _parse_config(raw: dict[str, Any]) -> AppConfig:
         genbank_api_key=str(genbank.get("api_key") or "") or None,
         blast_rescue=_parse_blast_rescue_config(blast_rescue),
         itsxrust=_parse_itsxrust_config(itsxrust),
+        tree_shrink_qc=_parse_tree_shrink_build_config(tree_shrink_qc),
     )
 
 
 def _coerce_config_value(key: str, value: str) -> str | int | float:
+    if key == "build.tree_shrink_qc.max_removed":
+        normalized = value.strip().lower()
+        if normalized in {"auto", "auto-select"}:
+            return "auto-select"
+        return int(value)
     if key.endswith(
         (
             "batch_size",
@@ -285,6 +315,7 @@ def _coerce_config_value(key: str, value: str) -> str | int | float:
             "word_size",
             "min_anchor_score",
             "max_per_anchor",
+            "bootstrap",
         )
     ):
         return int(value)
@@ -301,6 +332,7 @@ def _coerce_config_value(key: str, value: str) -> str | int | float:
             "min_identity",
             "min_query_length_ratio",
             "max_query_length_ratio",
+            "quantile",
         )
     ):
         return float(value)
@@ -334,6 +366,29 @@ def _parse_itsxrust_config(raw: dict[str, Any]) -> ItsxrustConfig:
         max_per_anchor=int(raw.get("max_per_anchor", 20)),
         max_anchor_evalue=float(raw.get("max_anchor_evalue", 0.01)),
     )
+
+
+def _parse_tree_shrink_build_config(raw: dict[str, Any]) -> TreeShrinkBuildConfig:
+    return TreeShrinkBuildConfig(
+        quantile=float(raw.get("quantile", 0.05)),
+        bootstrap=int(raw.get("bootstrap", 0)),
+        max_removed=_parse_tree_shrink_max_removed(raw.get("max_removed", "auto-select")),
+    )
+
+
+def _parse_tree_shrink_max_removed(value: Any) -> int | None:
+    if isinstance(value, str) and value.strip().lower() in {"auto", "auto-select"}:
+        return None
+    parsed = int(value)
+    if parsed < 1:
+        raise ConfigError(
+            "build.tree_shrink_qc.max_removed must be a positive integer or auto-select"
+        )
+    return parsed
+
+
+def _tree_shrink_max_removed_as_config_value(value: int | None) -> int | str:
+    return "auto-select" if value is None else value
 
 
 def _parse_blast_marker_config(

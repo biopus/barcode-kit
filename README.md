@@ -41,6 +41,9 @@ uv run barcode-kit config set paths.data_dir /path/to/barcode-kit-data
 uv run barcode-kit config set collectors.batch_size 500
 uv run barcode-kit config set collectors.timeout 30
 uv run barcode-kit config set collectors.retry_attempts 3
+uv run barcode-kit config set build.tree_shrink_qc.quantile 0.05
+uv run barcode-kit config set build.tree_shrink_qc.bootstrap 1000
+uv run barcode-kit config set build.tree_shrink_qc.max_removed auto-select
 ```
 
 查看当前有效配置：
@@ -99,14 +102,18 @@ uv run barcode-kit build --genus Iris --marker rbcl \
   --outdir ./out
 ```
 
-如需在构建后用 TreeShrink 去除长枝异常序列，可显式开启系统发育质控。使用前需确保 `mafft`、`iqtree` 和 `run_treeshrink.py` 已安装并可在 `PATH` 中找到：
+如需在构建后用 TreeShrink 去除长枝异常序列，可显式开启系统发育质控。使用前需确保 `mafft`、`iqtree` 和 `run_treeshrink.py` 已安装并可在 `PATH` 中找到。该流程固定使用 IQ-TREE `-m MFP -T AUTO` 建树，并以 TreeShrink `per-gene` 模式检测异常序列：
 
 ```bash
 uv run barcode-kit build --genus Iris --marker rbcl \
   --tree-shrink-qc \
-  --tree-shrink-qc-threads 4 \
-  --tree-shrink-qc-quantile 0.05 \
   --outdir ./out
+```
+
+TreeShrink 的 `-k` 上限通过 `build.tree_shrink_qc.max_removed` 配置。默认值为 `auto-select`，表示沿用 TreeShrink 根据数据自动选择的上限；需要更激进时可设置为正整数，例如：
+
+```bash
+uv run barcode-kit config set build.tree_shrink_qc.max_removed 6
 ```
 
 输出目录中会生成：
@@ -127,7 +134,6 @@ from barcode_kit.phylogeny import (
     SubprocessTreeRunner,
     SubprocessTreeShrinkRunner,
     SubprocessTrimalRunner,
-    TreeProgram,
     run_tree_shrink_qc,
 )
 
@@ -141,7 +147,6 @@ trimmed = SubprocessTrimalRunner().trim(aligned, Path("rbcl.trimmed.fasta"))
 SubprocessTreeRunner().build_tree(
     trimmed,
     Path("rbcl.tree"),
-    program=TreeProgram.FASTTREE,
     bootstrap=1000,
 )
 
@@ -149,7 +154,8 @@ run_tree_shrink_qc(
     Path("rbcl.fasta"),
     Path("rbcl.filtered.fasta"),
     Path("treeshrink-qc"),
-    threads=4,
+    bootstrap=1000,
+    max_removed=6,
     tree_shrink_runner=SubprocessTreeShrinkRunner(),
 )
 ```

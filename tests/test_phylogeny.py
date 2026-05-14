@@ -13,7 +13,6 @@ from barcode_kit.phylogeny import (
     SubprocessTreeShrinkRunner,
     SubprocessTrimalRunner,
     TreeShrinkResult,
-    TreeProgram,
     run_tree_shrink_qc,
 )
 
@@ -121,48 +120,10 @@ def test_trimal_runner_runs_automated1(tmp_path: Path, monkeypatch):
     ]
 
 
-def test_tree_runner_runs_fasttree_and_copies_tool_output(tmp_path: Path, monkeypatch):
-    input_path = tmp_path / "trimmed.fasta"
-    output_path = tmp_path / "tree.nwk"
-    input_path.write_text(">a\nACGT\n>b\nACGA\n", encoding="utf-8")
-    commands: list[list[str]] = []
-
-    def fake_which(name: str) -> str:
-        return f"/fake/{name}"
-
-    def fake_run(command, **kwargs):
-        commands.append(command)
-        tool_output = Path(command[command.index("-out") + 1])
-        tool_output.write_text("(a,b);\n", encoding="utf-8")
-        return subprocess.CompletedProcess(command, 0)
-
-    monkeypatch.setattr("barcode_kit.phylogeny.shutil.which", fake_which)
-    monkeypatch.setattr("barcode_kit.phylogeny.subprocess.run", fake_run)
-
-    result = SubprocessTreeRunner().build_tree(
-        input_path,
-        output_path,
-        program=TreeProgram.FASTTREE,
-        bootstrap=100,
-    )
-
-    assert result == output_path
-    assert output_path.read_text(encoding="utf-8") == "(a,b);\n"
-    assert commands == [
-        [
-            "/fake/FastTree",
-            "-out",
-            str(input_path) + ".fasttree.tre",
-            "-gtr",
-            "-boot",
-            "100",
-            "-nt",
-            str(input_path),
-        ]
-    ]
-
-
-def test_tree_runner_runs_iqtree_with_threads(tmp_path: Path, monkeypatch):
+def test_tree_runner_runs_iqtree_with_mfp_auto_threads_and_bootstrap(
+    tmp_path: Path,
+    monkeypatch,
+):
     input_path = tmp_path / "trimmed.fasta"
     output_path = tmp_path / "tree.nwk"
     input_path.write_text(">a\nACGT\n>b\nACGA\n", encoding="utf-8")
@@ -179,26 +140,26 @@ def test_tree_runner_runs_iqtree_with_threads(tmp_path: Path, monkeypatch):
     monkeypatch.setattr("barcode_kit.phylogeny.shutil.which", fake_which)
     monkeypatch.setattr("barcode_kit.phylogeny.subprocess.run", fake_run)
 
-    SubprocessTreeRunner().build_tree(
+    result = SubprocessTreeRunner().build_tree(
         input_path,
         output_path,
-        program=TreeProgram.IQTREE,
         bootstrap=1000,
-        threads=8,
     )
 
+    assert result == output_path
+    assert output_path.read_text(encoding="utf-8") == "(a,b);\n"
     assert commands == [
         [
-            "/fake/iqtree",
+            "/fake/iqtree3",
             "-s",
             str(input_path),
             "-redo",
+            "-m",
+            "MFP",
             "-B",
             "1000",
             "-T",
             "AUTO",
-            "-ntmax",
-            "8",
         ]
     ]
 
@@ -239,6 +200,7 @@ def test_treeshrink_runner_runs_installed_command_and_reads_removed_taxa(
         tree_path,
         output_dir,
         quantile=0.01,
+        max_removed=6,
     )
 
     assert result.removed_taxa == {"bad"}
@@ -254,6 +216,10 @@ def test_treeshrink_runner_runs_installed_command_and_reads_removed_taxa(
             "output",
             "-q",
             "0.01",
+            "-k",
+            "6",
+            "-m",
+            "per-gene",
             "-f",
         ]
     ]
@@ -280,12 +246,25 @@ def test_run_tree_shrink_qc_filters_original_fasta_after_alignment_and_tree(tmp_
             return output_path
 
     class FakeTreeRunner:
-        def build_tree(self, input_path, output_path, *, program, threads):
+        def __init__(self):
+            self.calls = []
+
+        def build_tree(self, input_path, output_path, *, bootstrap):
+            self.calls.append((input_path, output_path, bootstrap))
             output_path.write_text("(keep:0.1,bad:1.5);\n", encoding="utf-8")
             return output_path
 
     class FakeTreeShrinkRunner:
-        def detect_outliers(self, tree_path, output_dir, *, output_prefix="output", quantile=0.05):
+        def detect_outliers(
+            self,
+            tree_path,
+            output_dir,
+            *,
+            output_prefix="output",
+            quantile=0.05,
+            max_removed=None,
+        ):
+            self.call = (tree_path, output_dir, output_prefix, quantile, max_removed)
             output_dir.mkdir(parents=True, exist_ok=True)
             removed_path = output_dir / f"{output_prefix}.txt"
             removed_path.write_text("bad\t\n", encoding="utf-8")
@@ -295,17 +274,28 @@ def test_run_tree_shrink_qc_filters_original_fasta_after_alignment_and_tree(tmp_
                 removed_taxa_path=removed_path,
             )
 
+    tree_runner = FakeTreeRunner()
+    tree_shrink_runner = FakeTreeShrinkRunner()
     result = run_tree_shrink_qc(
         input_path,
         output_path,
         workdir,
-        threads=4,
+        bootstrap=1000,
+        max_removed=6,
         alignment_runner=FakeAlignmentRunner(),
-        tree_runner=FakeTreeRunner(),
-        tree_shrink_runner=FakeTreeShrinkRunner(),
+        tree_runner=tree_runner,
+        tree_shrink_runner=tree_shrink_runner,
     )
 
     assert result.removed_taxa == {"bad"}
     assert result.alignment_path == workdir / "mafft.fasta"
     assert result.tree_path == workdir / "iqtree.tree"
+    assert tree_runner.calls == [(workdir / "mafft.fasta", workdir / "iqtree.tree", 1000)]
+    assert tree_shrink_runner.call == (
+        workdir / "iqtree.tree",
+        workdir / "treeshrink",
+        "output",
+        0.05,
+        6,
+    )
     assert output_path.read_text(encoding="utf-8") == ">keep\nACGT\n"

@@ -15,7 +15,7 @@ from barcode_kit.genbank import DownloadItem, DownloadReport, SyncService
 from barcode_kit.blast import BlastRescueResult, BlastSeed
 from barcode_kit.itsxrust import ItsxrustExtractionResult
 from barcode_kit.models import GenBankCacheRecord, ItsExtractionMode, Marker, TaxonQuery, TaxonomyRecord
-from barcode_kit.phylogeny import AlignmentProgram, TreeProgram, TreeShrinkQcConfig, TreeShrinkResult
+from barcode_kit.phylogeny import AlignmentProgram, TreeShrinkQcConfig, TreeShrinkResult
 from barcode_kit.storage import Storage
 
 
@@ -193,7 +193,7 @@ def test_build_dataset_can_remove_treeshrink_long_branch_outliers(
         TaxonQuery("genus", "Iris"),
         Marker.RBCL,
         tmp_path / "out",
-        tree_shrink_qc=TreeShrinkQcConfig(threads=4),
+        tree_shrink_qc=TreeShrinkQcConfig(bootstrap=1000, max_removed=6),
         alignment_runner=alignment_runner,
         tree_runner=tree_runner,
         tree_shrink_runner=tree_shrink_runner,
@@ -214,15 +214,23 @@ def test_build_dataset_can_remove_treeshrink_long_branch_outliers(
             tmp_path / "out" / "treeshrink_qc" / "input.fasta",
             tmp_path / "out" / "treeshrink_qc" / "mafft.fasta",
             AlignmentProgram.MAFFT,
-            4,
+            1,
         )
     ]
     assert tree_runner.calls == [
         (
             tmp_path / "out" / "treeshrink_qc" / "mafft.fasta",
             tmp_path / "out" / "treeshrink_qc" / "iqtree.tree",
-            TreeProgram.IQTREE,
-            4,
+            1000,
+        )
+    ]
+    assert tree_shrink_runner.calls == [
+        (
+            tmp_path / "out" / "treeshrink_qc" / "iqtree.tree",
+            tmp_path / "out" / "treeshrink_qc" / "treeshrink",
+            "output",
+            0.05,
+            6,
         )
     ]
 
@@ -592,10 +600,10 @@ class FakeTreeRunner:
     def __init__(self):
         self.calls = []
 
-    def build_tree(self, input_path, output_path, *, program, threads):
+    def build_tree(self, input_path, output_path, *, bootstrap):
         input_path = Path(input_path)
         output_path = Path(output_path)
-        self.calls.append((input_path, output_path, program, threads))
+        self.calls.append((input_path, output_path, bootstrap))
         output_path.write_text("(PP476489.4|Iris_japonica:0.1,PP476490.1|Iris_japonica:1.5);\n", encoding="utf-8")
         return output_path
 
@@ -603,9 +611,20 @@ class FakeTreeRunner:
 class FakeTreeShrinkRunner:
     def __init__(self, removed_taxa: set[str]):
         self.removed_taxa = removed_taxa
+        self.calls = []
 
-    def detect_outliers(self, tree_path, output_dir, *, output_prefix="output", quantile=0.05):
+    def detect_outliers(
+        self,
+        tree_path,
+        output_dir,
+        *,
+        output_prefix="output",
+        quantile=0.05,
+        max_removed=None,
+    ):
+        tree_path = Path(tree_path)
         output_dir = Path(output_dir)
+        self.calls.append((tree_path, output_dir, output_prefix, quantile, max_removed))
         output_dir.mkdir(parents=True, exist_ok=True)
         removed_path = output_dir / f"{output_prefix}.txt"
         removed_path.write_text("\t".join(sorted(self.removed_taxa)) + "\n", encoding="utf-8")

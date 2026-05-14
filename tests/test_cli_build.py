@@ -58,20 +58,28 @@ def test_build_passes_treeshrink_qc_options(tmp_path: Path, monkeypatch):
         outdir: Path,
         **kwargs: Any,
     ) -> list[BuildReportEntry]:
-        assert kwargs["tree_shrink_qc"] == TreeShrinkQcConfig(threads=8, quantile=0.01)
+        assert kwargs["tree_shrink_qc"] == TreeShrinkQcConfig(
+            quantile=0.01,
+            bootstrap=1000,
+            max_removed=6,
+        )
         return []
 
     config_path = tmp_path / "config.toml"
     data_dir = tmp_path / "data"
-    monkeypatch.setenv("BARCODE_KIT_CONFIG", str(config_path))
-    monkeypatch.setattr(
-        cli.config_module,
-        "DEFAULT_CONFIG",
-        {
-            **cli.config_module.DEFAULT_CONFIG,
-            "paths": {"data_dir": str(data_dir)},
-        },
+    config_path.write_text(
+        f"""
+[paths]
+data_dir = "{data_dir}"
+
+[build.tree_shrink_qc]
+quantile = 0.01
+bootstrap = 1000
+max_removed = 6
+""",
+        encoding="utf-8",
     )
+    monkeypatch.setenv("BARCODE_KIT_CONFIG", str(config_path))
     monkeypatch.setattr(cli, "Storage", lambda path: object())
     monkeypatch.setattr(cli, "build_dataset", fake_build_dataset)
 
@@ -86,11 +94,49 @@ def test_build_passes_treeshrink_qc_options(tmp_path: Path, monkeypatch):
             "--outdir",
             str(tmp_path / "out"),
             "--tree-shrink-qc",
-            "--tree-shrink-qc-threads",
-            "8",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+
+
+def test_build_rejects_treeshrink_qc_quantile_cli_option(tmp_path: Path, monkeypatch):
+    config_path = tmp_path / "config.toml"
+    monkeypatch.setenv("BARCODE_KIT_CONFIG", str(config_path))
+
+    result = CliRunner().invoke(
+        cli.app,
+        [
+            "build",
+            "--genus",
+            "Iris",
+            "--marker",
+            "rbcl",
             "--tree-shrink-qc-quantile",
             "0.01",
         ],
     )
 
-    assert result.exit_code == 0, result.output
+    assert result.exit_code != 0
+    assert "No such option: --tree-shrink-qc-quantile" in result.output
+
+
+def test_build_rejects_treeshrink_qc_threads_cli_option(tmp_path: Path, monkeypatch):
+    config_path = tmp_path / "config.toml"
+    monkeypatch.setenv("BARCODE_KIT_CONFIG", str(config_path))
+
+    result = CliRunner().invoke(
+        cli.app,
+        [
+            "build",
+            "--genus",
+            "Iris",
+            "--marker",
+            "rbcl",
+            "--tree-shrink-qc-threads",
+            "8",
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "No such option: --tree-shrink-qc-threads" in result.output

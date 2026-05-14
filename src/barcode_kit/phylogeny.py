@@ -18,24 +18,12 @@ class AlignmentProgram(StrEnum):
     CLUSTALO = "clustalo"
 
 
-class TreeProgram(StrEnum):
-    FASTTREE = "fasttree"
-    VERYFASTTREE = "veryfasttree"
-    IQTREE = "iqtree"
-    RAXMLNG = "raxmlng"
-
-
 ALIGNMENT_COMMANDS = {
     AlignmentProgram.MAFFT: "mafft",
     AlignmentProgram.MUSCLE: "muscle",
     AlignmentProgram.CLUSTALO: "clustalo",
 }
-TREE_COMMANDS = {
-    TreeProgram.FASTTREE: "FastTree",
-    TreeProgram.VERYFASTTREE: "VeryFastTree",
-    TreeProgram.IQTREE: "iqtree3",
-    TreeProgram.RAXMLNG: "raxml-ng",
-}
+IQTREE_COMMAND = "iqtree3"
 TRIMAL_COMMAND = "trimal"
 TREESHRINK_COMMAND = "run_treeshrink.py"
 
@@ -49,8 +37,9 @@ class TreeShrinkResult:
 
 @dataclass(frozen=True)
 class TreeShrinkQcConfig:
-    threads: int = 1
     quantile: float = 0.05
+    bootstrap: int = 0
+    max_removed: int | None = None
 
 
 @dataclass(frozen=True)
@@ -81,8 +70,7 @@ class TreeRunner(Protocol):
         input_path: Path,
         output_path: Path,
         *,
-        program: TreeProgram,
-        threads: int,
+        bootstrap: int,
     ) -> Path:
         ...
 
@@ -95,6 +83,7 @@ class TreeShrinkRunner(Protocol):
         *,
         output_prefix: str = "output",
         quantile: float = 0.05,
+        max_removed: int | None = None,
     ) -> TreeShrinkResult:
         ...
 
@@ -186,22 +175,17 @@ class SubprocessTreeRunner:
         input_path: Path,
         output_path: Path,
         *,
-        program: TreeProgram = TreeProgram.FASTTREE,
         bootstrap: int = 0,
-        threads: int = 1,
     ) -> Path:
-        executable = _find_executable(TREE_COMMANDS[program])
+        executable = _find_executable(IQTREE_COMMAND)
         input_path = Path(input_path)
         output_path = Path(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        tool_output_path = _tool_tree_output_path(input_path, program)
+        tool_output_path = _tool_tree_output_path(input_path)
         command = _tree_command(
             executable,
             input_path,
-            tool_output_path,
-            program,
             bootstrap,
-            max(1, threads),
         )
         _run_command(command)
         _ensure_output(tool_output_path, "phylogenetic tree reconstruction")
@@ -217,6 +201,7 @@ class SubprocessTreeShrinkRunner:
         *,
         output_prefix: str = "output",
         quantile: float = 0.05,
+        max_removed: int | None = None,
     ) -> TreeShrinkResult:
         executable = _find_executable(TREESHRINK_COMMAND)
         output_dir = Path(output_dir)
@@ -231,8 +216,10 @@ class SubprocessTreeShrinkRunner:
             output_prefix,
             "-q",
             str(quantile),
-            "-f",
         ]
+        if max_removed is not None:
+            command.extend(["-k", str(max_removed)])
+        command.extend(["-m", "per-gene", "-f"])
         _run_command(command)
         removed_taxa_path = _ensure_output(output_dir / f"{output_prefix}.txt", "TreeShrink")
         return TreeShrinkResult(
@@ -247,8 +234,9 @@ def run_tree_shrink_qc(
     output_fasta: Path,
     workdir: Path,
     *,
-    threads: int = 1,
     quantile: float = 0.05,
+    bootstrap: int = 0,
+    max_removed: int | None = None,
     alignment_runner: AlignmentRunner | None = None,
     tree_runner: TreeRunner | None = None,
     tree_shrink_runner: TreeShrinkRunner | None = None,
@@ -269,18 +257,18 @@ def run_tree_shrink_qc(
         input_fasta,
         alignment_path,
         program=AlignmentProgram.MAFFT,
-        threads=threads,
+        threads=1,
     )
     tree_runner.build_tree(
         alignment_path,
         tree_path,
-        program=TreeProgram.IQTREE,
-        threads=threads,
+        bootstrap=bootstrap,
     )
     tree_shrink_result = tree_shrink_runner.detect_outliers(
         tree_path,
         tree_shrink_output_dir,
         quantile=quantile,
+        max_removed=max_removed,
     )
     _write_filtered_fasta(input_fasta, output_fasta, tree_shrink_result.removed_taxa)
     return TreeShrinkQcResult(
@@ -296,61 +284,17 @@ def run_tree_shrink_qc(
 def _tree_command(
     executable: str,
     input_path: Path,
-    tool_output_path: Path,
-    program: TreeProgram,
     bootstrap: int,
-    threads: int,
 ) -> list[str]:
-    if program is TreeProgram.IQTREE:
-        command = [executable, "-s", str(input_path), "-redo"]
-        if bootstrap:
-            command.extend(["-B", str(bootstrap)])
-        if threads > 1:
-            command.extend(["-T", "AUTO", "-ntmax", str(threads)])
-        else:
-            command.extend(["-T", "1"])
-        return command
-
-    if program is TreeProgram.RAXMLNG:
-        command = [
-            executable,
-            "--msa",
-            str(input_path),
-            "--msa-format",
-            "FASTA",
-            "--model",
-            "GTR+G",
-            "--redo",
-        ]
-        if bootstrap:
-            command.extend(["--all", "--bs-trees", str(bootstrap)])
-        else:
-            command.append("--search")
-        if threads > 1:
-            command.extend(["--threads", f"auto{{{threads}}}", "--workers", "auto"])
-        else:
-            command.extend(["--threads", "1"])
-        return command
-
-    command = [executable, "-out", str(tool_output_path), "-gtr"]
+    command = [executable, "-s", str(input_path), "-redo", "-m", "MFP"]
     if bootstrap:
-        command.extend(["-boot", str(bootstrap)])
-    else:
-        command.append("-nosupport")
-    if program is TreeProgram.VERYFASTTREE and threads > 1:
-        command.extend(["-threads", str(threads)])
-    command.extend(["-nt", str(input_path)])
+        command.extend(["-B", str(bootstrap)])
+    command.extend(["-T", "AUTO"])
     return command
 
 
-def _tool_tree_output_path(input_path: Path, program: TreeProgram) -> Path:
-    if program is TreeProgram.IQTREE:
-        return Path(str(input_path) + ".treefile")
-    if program is TreeProgram.RAXMLNG:
-        return Path(str(input_path) + ".raxml.bestTree")
-    if program is TreeProgram.VERYFASTTREE:
-        return Path(str(input_path) + ".veryfasttree.tre")
-    return Path(str(input_path) + ".fasttree.tre")
+def _tool_tree_output_path(input_path: Path) -> Path:
+    return Path(str(input_path) + ".treefile")
 
 
 def _find_executable(command: str) -> str:
