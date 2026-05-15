@@ -46,6 +46,8 @@ class TaxonQuery:
     name: str
 
     def ncbi_term(self) -> str:
+        if self.rank == "taxid":
+            return f"txid{self.name}[Organism:exp]"
         return f"{self.name}[Organism]"
 
 

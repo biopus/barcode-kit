@@ -33,6 +33,7 @@ DOWNLOAD_PROGRESS_INTERVAL_SECONDS = 0.5
 FamilyOption = Annotated[str | None, typer.Option("--family", help="Family taxon name.")]
 GenusOption = Annotated[str | None, typer.Option("--genus", help="Genus taxon name.")]
 SpeciesOption = Annotated[str | None, typer.Option("--species", help="Species scientific name.")]
+TaxidOption = Annotated[int, typer.Option("--taxid", help="NCBI taxonomy ID.")]
 YesOption = Annotated[bool, typer.Option("--yes", "-y", help="Skip confirmation prompt.")]
 RankOption = Annotated[
     str | None,
@@ -43,12 +44,10 @@ RankOption = Annotated[
 @app.command()
 def sync(
     marker: Annotated[Marker, typer.Option("--marker", case_sensitive=False)],
-    family: FamilyOption = None,
-    genus: GenusOption = None,
-    species: SpeciesOption = None,
+    taxid: TaxidOption,
 ) -> None:
     """Synchronize matching GenBank records into the local cache."""
-    _run_user_command(lambda: _sync(marker, family, genus, species))
+    _run_user_command(lambda: _sync(marker, taxid))
 
 
 @app.command()
@@ -152,8 +151,11 @@ def main() -> None:
     app()
 
 
-def _sync(marker: Marker, family: str | None, genus: str | None, species: str | None) -> None:
-    query = _taxon_query(family, genus, species)
+def _sync(
+    marker: Marker,
+    taxid: int,
+) -> None:
+    query = TaxonQuery(rank="taxid", name=str(taxid))
     config = config_module.load_or_create_config()
     config_module.ensure_app_dirs(config)
     storage = Storage(config.database_path)
@@ -482,8 +484,16 @@ def _config_set(key: str, value: str) -> None:
     typer.echo(json.dumps(config_module.config_as_dict(config), ensure_ascii=False, indent=2))
 
 
-def _taxon_query(family: str | None, genus: str | None, species: str | None) -> TaxonQuery:
-    values = [("family", family), ("genus", genus), ("species", species)]
+def _taxon_query(
+    family: str | None,
+    genus: str | None,
+    species: str | None,
+) -> TaxonQuery:
+    values = [
+        ("family", family),
+        ("genus", genus),
+        ("species", species),
+    ]
     selected = [(rank, value) for rank, value in values if value]
     if len(selected) != 1:
         raise BarcodeKitError("provide exactly one of --family, --genus, or --species")

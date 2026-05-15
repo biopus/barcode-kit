@@ -107,6 +107,18 @@ def test_sync_uses_ncbi_search_term_for_its_marker(tmp_path: Path):
     assert client.search_terms == ['Iris[Organism] AND "internal transcribed spacer"']
 
 
+def test_sync_uses_expanded_taxid_organism_term(tmp_path: Path):
+    config = _config(tmp_path)
+    storage = Storage(config.database_path)
+    client = FakeClient({})
+    service = SyncService(config, storage, FakeResolver(), client)
+
+    result = service.sync(TaxonQuery("taxid", "58920"), Marker.RBCL)
+
+    assert result.remote_count == 0
+    assert client.search_terms == ["txid58920[Organism:exp] AND rbcl"]
+
+
 def test_build_dataset_exports_fasta_and_report(tmp_path: Path, genbank_text):
     config = _config(tmp_path)
     storage = Storage(config.database_path)

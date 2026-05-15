@@ -27,14 +27,14 @@ def test_sync_writes_live_download_rate_to_stderr_and_final_json_to_stdout(
             marker: Marker,
             progress: Any | None = None,
         ) -> SyncResult:
-            assert query == TaxonQuery("genus", "Iris")
+            assert query == TaxonQuery("taxid", "58920")
             assert marker is Marker.RBCL
             assert progress is not None
             progress.start_download(total_records=1)
             progress.record_downloaded_bytes(2048)
             progress.record_downloaded_record("PP476489.4")
             return SyncResult(
-                query="Iris[Organism] AND rbcl",
+                query="txid58920[Organism:exp] AND rbcl",
                 remote_count=1,
                 downloaded=1,
                 reused_local=0,
@@ -63,13 +63,13 @@ def test_sync_writes_live_download_rate_to_stderr_and_final_json_to_stdout(
 
     result = CliRunner().invoke(
         cli.app,
-        ["sync", "--genus", "Iris", "--marker", "rbcl"],
+        ["sync", "--taxid", "58920", "--marker", "rbcl"],
     )
 
     assert result.exit_code == 0, result.output
     assert json.loads(result.stdout) == asdict(
         SyncResult(
-            query="Iris[Organism] AND rbcl",
+            query="txid58920[Organism:exp] AND rbcl",
             remote_count=1,
             downloaded=1,
             reused_local=0,
@@ -84,6 +84,66 @@ def test_sync_writes_live_download_rate_to_stderr_and_final_json_to_stdout(
     assert "avg=" in result.stderr
 
 
+def test_sync_help_only_exposes_taxid_taxon_selector():
+    result = CliRunner().invoke(cli.app, ["sync", "--help"])
+
+    assert result.exit_code == 0, result.output
+    assert "--taxid" in result.output
+    assert "--family" not in result.output
+    assert "--genus" not in result.output
+    assert "--species" not in result.output
+
+
+def test_sync_accepts_taxid_query(tmp_path: Path, monkeypatch):
+    class FakeSyncService:
+        def __init__(self, config: AppConfig, storage: Any, taxonomy_resolver: Any):
+            pass
+
+        def sync(
+            self,
+            query: TaxonQuery,
+            marker: Marker,
+            progress: Any | None = None,
+        ) -> SyncResult:
+            assert query == TaxonQuery("taxid", "58920")
+            assert marker is Marker.RBCL
+            return SyncResult(
+                query="txid58920[Organism:exp] AND rbcl",
+                remote_count=0,
+                downloaded=0,
+                reused_local=0,
+                ingested=0,
+                skipped=0,
+                updated=0,
+                failed=[],
+            )
+
+        def close(self) -> None:
+            pass
+
+    config = AppConfig(
+        data_dir=tmp_path / "data",
+        batch_size=500,
+        download_workers=1,
+        timeout=30,
+        retry_attempts=3,
+        genbank_email="test@example.com",
+    )
+    monkeypatch.setattr(cli.config_module, "load_or_create_config", lambda: config)
+    monkeypatch.setattr(cli.config_module, "ensure_app_dirs", lambda config: None)
+    monkeypatch.setattr(cli, "Storage", lambda path: object())
+    monkeypatch.setattr(cli, "ETETaxonomyResolver", lambda: object())
+    monkeypatch.setattr(cli, "SyncService", FakeSyncService)
+
+    result = CliRunner().invoke(
+        cli.app,
+        ["sync", "--taxid", "58920", "--marker", "rbcl"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["query"] == "txid58920[Organism:exp] AND rbcl"
+
+
 def test_sync_creates_missing_config_file_before_running(tmp_path: Path, monkeypatch):
     class FakeSyncService:
         def __init__(self, config: AppConfig, storage: Any, taxonomy_resolver: Any):
@@ -95,8 +155,9 @@ def test_sync_creates_missing_config_file_before_running(tmp_path: Path, monkeyp
             marker: Marker,
             progress: Any | None = None,
         ) -> SyncResult:
+            assert query == TaxonQuery("taxid", "58920")
             return SyncResult(
-                query="Iris[Organism] AND rbcl",
+                query="txid58920[Organism:exp] AND rbcl",
                 remote_count=0,
                 downloaded=0,
                 reused_local=0,
@@ -126,7 +187,7 @@ def test_sync_creates_missing_config_file_before_running(tmp_path: Path, monkeyp
 
     result = CliRunner().invoke(
         cli.app,
-        ["sync", "--genus", "Iris", "--marker", "rbcl"],
+        ["sync", "--taxid", "58920", "--marker", "rbcl"],
     )
 
     assert result.exit_code == 0, result.output
@@ -155,7 +216,7 @@ def test_sync_rejects_trnl_trnf_marker(tmp_path: Path, monkeypatch):
 
     result = CliRunner().invoke(
         cli.app,
-        ["sync", "--genus", "Iris", "--marker", "trnl-trnf"],
+        ["sync", "--taxid", "58920", "--marker", "trnl-trnf"],
     )
 
     assert result.exit_code == 2
