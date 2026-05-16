@@ -8,7 +8,11 @@ from barcode_kit.exceptions import TaxonomyError
 from barcode_kit.models import TaxonomyRecord
 
 
-UNCERTAIN_RE = re.compile(r"\b(sp\.|cf\.|aff\.|unidentified|unknown|uncultured)\b", re.IGNORECASE)
+UNCERTAIN_RE = re.compile(
+    r"\b(?:sp|cf|aff)\.(?=\s|$)|\b(?:unidentified|unknown|uncultured)\b",
+    re.IGNORECASE,
+)
+
 HYBRID_RE = re.compile(r"(×|\bx\b|\bhybrid\b|notho)", re.IGNORECASE)
 LINEAGE_RANKS = ("kingdom", "phylum", "class", "order", "family", "genus", "species")
 
