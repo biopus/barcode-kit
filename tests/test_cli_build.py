@@ -49,6 +49,55 @@ def test_build_creates_missing_config_file_before_running(tmp_path: Path, monkey
     assert "[build.blast_rescue]" in config_path.read_text(encoding="utf-8")
 
 
+def test_build_accepts_lineage_constraints_for_taxon_query(tmp_path: Path, monkeypatch):
+    def fake_build_dataset(
+        config: AppConfig,
+        storage: Any,
+        query: TaxonQuery,
+        marker: Marker,
+        outdir: Path,
+        **kwargs: Any,
+    ) -> list[BuildReportEntry]:
+        assert query.rank == "genus"
+        assert query.name == "Iris"
+        assert [(item.rank, item.name) for item in query.constraints] == [
+            ("kingdom", "Viridiplantae"),
+        ]
+        assert marker is Marker.RBCL
+        return []
+
+    config_path = tmp_path / "config.toml"
+    data_dir = tmp_path / "data"
+    monkeypatch.setenv("BARCODE_KIT_CONFIG", str(config_path))
+    monkeypatch.setattr(
+        cli.config_module,
+        "DEFAULT_CONFIG",
+        {
+            **cli.config_module.DEFAULT_CONFIG,
+            "paths": {"data_dir": str(data_dir)},
+        },
+    )
+    monkeypatch.setattr(cli, "Storage", lambda path: object())
+    monkeypatch.setattr(cli, "build_dataset", fake_build_dataset)
+
+    result = CliRunner().invoke(
+        cli.app,
+        [
+            "build",
+            "--kindom",
+            "Viridiplantae",
+            "--genus",
+            "Iris",
+            "--marker",
+            "rbcl",
+            "--outdir",
+            str(tmp_path / "out"),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+
+
 def test_build_passes_treeshrink_qc_options(tmp_path: Path, monkeypatch):
     def fake_build_dataset(
         config: AppConfig,

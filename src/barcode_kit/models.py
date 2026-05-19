@@ -41,14 +41,25 @@ class ItsExtractionMode(StrEnum):
 
 
 @dataclass(frozen=True)
-class TaxonQuery:
+class TaxonConstraint:
     rank: str
     name: str
 
+
+@dataclass(frozen=True)
+class TaxonQuery:
+    rank: str
+    name: str
+    constraints: tuple[TaxonConstraint, ...] = ()
+
     def ncbi_term(self) -> str:
-        if self.rank == "taxid":
-            return f"txid{self.name}[Organism:exp]"
-        return f"{self.name}[Organism]"
+        terms = [
+            f"txid{self.name}[Organism:exp]"
+            if self.rank == "taxid"
+            else f"{self.name}[Organism]"
+        ]
+        terms.extend(f"{constraint.name}[Organism]" for constraint in self.constraints)
+        return " AND ".join(terms)
 
 
 @dataclass(frozen=True)

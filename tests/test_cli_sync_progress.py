@@ -84,14 +84,69 @@ def test_sync_writes_live_download_rate_to_stderr_and_final_json_to_stdout(
     assert "avg=" in result.stderr
 
 
-def test_sync_help_only_exposes_taxid_taxon_selector():
+def test_sync_help_exposes_taxid_and_lineage_taxon_selectors():
     result = CliRunner().invoke(cli.app, ["sync", "--help"])
 
     assert result.exit_code == 0, result.output
     assert "--taxid" in result.output
-    assert "--family" not in result.output
-    assert "--genus" not in result.output
-    assert "--species" not in result.output
+    assert "--kingdom" in result.output
+    assert "--family" in result.output
+    assert "--genus" in result.output
+    assert "--species" in result.output
+
+
+def test_sync_accepts_lineage_constrained_name_query(tmp_path: Path, monkeypatch):
+    class FakeSyncService:
+        def __init__(self, config: AppConfig, storage: Any, taxonomy_resolver: Any):
+            pass
+
+        def sync(
+            self,
+            query: TaxonQuery,
+            marker: Marker,
+            progress: Any | None = None,
+        ) -> SyncResult:
+            assert query.rank == "genus"
+            assert query.name == "Iris"
+            assert [(item.rank, item.name) for item in query.constraints] == [
+                ("kingdom", "Viridiplantae"),
+            ]
+            assert marker is Marker.RBCL
+            return SyncResult(
+                query="Iris[Organism] AND Viridiplantae[Organism] AND rbcl",
+                remote_count=0,
+                downloaded=0,
+                reused_local=0,
+                ingested=0,
+                skipped=0,
+                updated=0,
+                failed=[],
+            )
+
+        def close(self) -> None:
+            pass
+
+    config = AppConfig(
+        data_dir=tmp_path / "data",
+        batch_size=500,
+        download_workers=1,
+        timeout=30,
+        retry_attempts=3,
+        genbank_email="test@example.com",
+    )
+    monkeypatch.setattr(cli.config_module, "load_or_create_config", lambda: config)
+    monkeypatch.setattr(cli.config_module, "ensure_app_dirs", lambda config: None)
+    monkeypatch.setattr(cli, "Storage", lambda path: object())
+    monkeypatch.setattr(cli, "ETETaxonomyResolver", lambda: object())
+    monkeypatch.setattr(cli, "SyncService", FakeSyncService)
+
+    result = CliRunner().invoke(
+        cli.app,
+        ["sync", "--kingdom", "Viridiplantae", "--genus", "Iris", "--marker", "rbcl"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["query"] == "Iris[Organism] AND Viridiplantae[Organism] AND rbcl"
 
 
 def test_sync_accepts_taxid_query(tmp_path: Path, monkeypatch):

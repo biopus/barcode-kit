@@ -1,6 +1,12 @@
 from __future__ import annotations
 
-from barcode_kit.models import GenBankCacheRecord, TaxonQuery, TaxonomyRecord
+from barcode_kit.models import (
+    GenBankCacheRecord,
+    Marker,
+    TaxonConstraint,
+    TaxonQuery,
+    TaxonomyRecord,
+)
 from barcode_kit.storage import Storage
 
 
@@ -79,6 +85,56 @@ def test_cache_records_filters_by_taxon_and_accession(tmp_path):
 
     assert [record.accession_version for record in iris_records] == ["PP476489.4"]
     assert [record.accession_root for record in accession_records] == ["AB000001"]
+
+
+def test_candidate_records_applies_lineage_constraints_for_homonymous_genus(tmp_path):
+    storage = Storage(tmp_path / "cache.db")
+    storage.initialize()
+    storage.upsert_taxonomy(
+        TaxonomyRecord(
+            taxon_id=12345,
+            scientific_name="Iris japonica",
+            kingdom="Viridiplantae",
+            family="Iridaceae",
+            genus="Iris",
+        )
+    )
+    storage.upsert_taxonomy(
+        TaxonomyRecord(
+            taxon_id=67890,
+            scientific_name="Iris oratoria",
+            kingdom="Metazoa",
+            family="Tarachodidae",
+            genus="Iris",
+        )
+    )
+    storage.upsert_genbank_cache(
+        GenBankCacheRecord(
+            accession_root="PP476489",
+            version=4,
+            accession_version="PP476489.4",
+            taxon_id=12345,
+            has_rbcl=True,
+        )
+    )
+    storage.upsert_genbank_cache(
+        GenBankCacheRecord(
+            accession_root="AB000001",
+            version=2,
+            accession_version="AB000001.2",
+            taxon_id=67890,
+            has_rbcl=True,
+        )
+    )
+    query = TaxonQuery(
+        "genus",
+        "Iris",
+        constraints=(TaxonConstraint(rank="kingdom", name="Viridiplantae"),),
+    )
+
+    records = storage.candidate_records(query, Marker.RBCL)
+
+    assert [record.accession_version for record, taxonomy in records] == ["PP476489.4"]
 
 
 def test_taxon_summaries_lists_genus_with_counts_and_marker_coverage(tmp_path):

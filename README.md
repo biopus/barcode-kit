@@ -68,9 +68,15 @@ uv run barcode-kit config list
 
 ### 同步 GenBank 记录
 
-每次同步必须且只能指定一个 taxon 条件：`--family`、`--genus` 或 `--species`。
+同步可以使用 NCBI TaxId，也可以使用 taxonomy 名称条件。名称查询至少需要指定
+`--family`、`--genus` 或 `--species` 之一；当同时提供多个阶元时，最具体的
+`family/genus/species` 会作为目标 taxon，其它阶元作为约束，用来处理同名类群。
+支持的约束阶元包括 `--kingdom`、`--phylum`、`--class`、`--order`、`--family`、
+`--genus` 和 `--species`。`--kindom` 作为 `--kingdom` 的兼容别名可用。
 
 ```bash
+uv run barcode-kit sync --taxid 58920 --marker rbcl
+uv run barcode-kit sync --kingdom Viridiplantae --genus Iris --marker rbcl
 uv run barcode-kit sync --genus Iris --marker rbcl
 uv run barcode-kit sync --species "Iris japonica" --marker its
 uv run barcode-kit sync --family Iridaceae --marker matk
@@ -91,10 +97,17 @@ uv run barcode-kit sync --family Iridaceae --marker matk
 uv run barcode-kit build --genus Iris --marker rbcl --outdir ./out
 ```
 
+构建阶段同样支持 taxonomy 约束，适合排除 NCBI 中的同名类群，例如植物
+`Iris` 和动物 `Iris`：
+
+```bash
+uv run barcode-kit build --kingdom Viridiplantae --genus Iris --marker rbcl --outdir ./out
+```
+
 可在构建时应用质量和 taxonomy 过滤：
 
 ```bash
-uv run barcode-kit build --genus Iris --marker rbcl \
+uv run barcode-kit build --kingdom Viridiplantae --genus Iris --marker rbcl \
   --min-length 500 \
   --max-ambiguous-content 0.05 \
   --exclude-hybrid \

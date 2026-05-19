@@ -28,6 +28,10 @@ CREATE TABLE IF NOT EXISTS taxonomy (
 );
 
 CREATE INDEX IF NOT EXISTS idx_taxonomy_scientific_name ON taxonomy(scientific_name);
+CREATE INDEX IF NOT EXISTS idx_taxonomy_kingdom ON taxonomy(kingdom);
+CREATE INDEX IF NOT EXISTS idx_taxonomy_phylum ON taxonomy(phylum);
+CREATE INDEX IF NOT EXISTS idx_taxonomy_class ON taxonomy("class");
+CREATE INDEX IF NOT EXISTS idx_taxonomy_order ON taxonomy("order");
 CREATE INDEX IF NOT EXISTS idx_taxonomy_family ON taxonomy(family);
 CREATE INDEX IF NOT EXISTS idx_taxonomy_genus ON taxonomy(genus);
 
@@ -48,6 +52,15 @@ CREATE INDEX IF NOT EXISTS idx_genbank_cache_taxon_id ON genbank_cache(taxon_id)
 """
 
 SQLITE_PARAMETER_CHUNK_SIZE = 900
+TAXONOMY_FILTER_COLUMNS = {
+    "kingdom": "kingdom",
+    "phylum": "phylum",
+    "class": '"class"',
+    "order": '"order"',
+    "family": "family",
+    "genus": "genus",
+    "species": "scientific_name",
+}
 T = TypeVar("T")
 
 
@@ -185,12 +198,10 @@ class Storage:
         where: list[str] = []
         params: list[Any] = []
         if query is not None:
-            if query.rank not in {"family", "genus", "species"}:
-                raise ValueError(f"unsupported taxon rank: {query.rank}")
             joins = "JOIN taxonomy t ON t.taxon_id = c.taxon_id"
-            taxon_column = "scientific_name" if query.rank == "species" else query.rank
-            where.append(f"lower(t.{taxon_column}) = lower(?)")
-            params.append(query.name)
+            query_where, query_params = _query_filters(query, "t")
+            where.extend(query_where)
+            params.extend(query_params)
         if accession is not None:
             where.append("(c.accession_root = ? OR c.accession_version = ?)")
             params.extend([accession, accession])
@@ -245,10 +256,8 @@ class Storage:
         }
 
     def candidate_records(self, query: TaxonQuery, marker: Marker) -> list[tuple[GenBankCacheRecord, TaxonomyRecord]]:
-        if query.rank not in {"family", "genus", "species"}:
-            raise ValueError(f"unsupported taxon rank: {query.rank}")
         marker_column = marker.cache_column
-        taxon_column = "scientific_name" if query.rank == "species" else query.rank
+        query_where, query_params = _query_filters(query, "t")
         sql = f"""
         SELECT
             c.*,
@@ -266,11 +275,11 @@ class Storage:
             t.is_uncertain
         FROM genbank_cache c
         JOIN taxonomy t ON t.taxon_id = c.taxon_id
-        WHERE c.{marker_column} = 1 AND lower(t.{taxon_column}) = lower(?)
+        WHERE c.{marker_column} = 1 AND {' AND '.join(query_where)}
         ORDER BY t.scientific_name, c.accession_version
         """
         with self.connect() as connection:
-            rows = connection.execute(sql, (query.name,)).fetchall()
+            rows = connection.execute(sql, query_params).fetchall()
         return [(_cache_from_row(row), _taxonomy_from_joined_row(row)) for row in rows]
 
     def counts(self) -> dict[str, int]:
@@ -281,11 +290,10 @@ class Storage:
 
     def marker_counts(self, query: TaxonQuery | None = None) -> dict[str, int]:
         where = ""
-        params: tuple[Any, ...] = ()
+        params: list[Any] = []
         if query is not None:
-            column = "scientific_name" if query.rank == "species" else query.rank
-            where = f"WHERE lower(t.{column}) = lower(?)"
-            params = (query.name,)
+            query_where, params = _query_filters(query, "t")
+            where = f"WHERE {' AND '.join(query_where)}"
         sql = f"""
         SELECT
             SUM(c.has_its) AS its,
@@ -311,11 +319,9 @@ class Storage:
         where = [f"t.{name_column} IS NOT NULL", f"trim(t.{name_column}) != ''"]
         params: list[Any] = []
         if query is not None:
-            if query.rank not in {"family", "genus", "species"}:
-                raise ValueError(f"unsupported taxon rank: {query.rank}")
-            filter_column = "scientific_name" if query.rank == "species" else query.rank
-            where.append(f"lower(t.{filter_column}) = lower(?)")
-            params.append(query.name)
+            query_where, query_params = _query_filters(query, "t")
+            where.extend(query_where)
+            params.extend(query_params)
         sql = f"""
         SELECT
             MIN(t.{name_column}) AS name,
@@ -345,6 +351,29 @@ class Storage:
             }
             for row in rows
         ]
+
+
+def _query_filters(query: TaxonQuery, alias: str) -> tuple[list[str], list[Any]]:
+    filters = [(query.rank, query.name)]
+    filters.extend(
+        (constraint.rank, constraint.name)
+        for constraint in getattr(query, "constraints", ())
+    )
+
+    where: list[str] = []
+    params: list[Any] = []
+    seen: set[tuple[str, str]] = set()
+    for rank, name in filters:
+        column = TAXONOMY_FILTER_COLUMNS.get(rank)
+        if column is None:
+            raise ValueError(f"unsupported taxon rank: {rank}")
+        key = (rank, name.casefold())
+        if key in seen:
+            continue
+        seen.add(key)
+        where.append(f"lower({alias}.{column}) = lower(?)")
+        params.append(name)
+    return where, params
 
 
 def _cache_from_row(row: sqlite3.Row) -> GenBankCacheRecord:

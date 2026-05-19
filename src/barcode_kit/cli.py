@@ -16,7 +16,7 @@ from barcode_kit import config as config_module
 from barcode_kit.builder import build_dataset
 from barcode_kit.exceptions import BarcodeKitError
 from barcode_kit.genbank import SyncService
-from barcode_kit.models import ItsExtractionMode, Marker, TaxonQuery
+from barcode_kit.models import ItsExtractionMode, Marker, TaxonConstraint, TaxonQuery
 from barcode_kit.phylogeny import TreeShrinkQcConfig
 from barcode_kit.storage import Storage
 from barcode_kit.taxonomy import ETETaxonomyResolver
@@ -30,10 +30,17 @@ app.add_typer(config_app, name="config")
 DOWNLOAD_PROGRESS_INTERVAL_SECONDS = 0.5
 
 
+KingdomOption = Annotated[
+    str | None,
+    typer.Option("--kingdom", "--kindom", help="Kingdom taxon name."),
+]
+PhylumOption = Annotated[str | None, typer.Option("--phylum", help="Phylum taxon name.")]
+ClassOption = Annotated[str | None, typer.Option("--class", help="Class taxon name.")]
+OrderOption = Annotated[str | None, typer.Option("--order", help="Order taxon name.")]
 FamilyOption = Annotated[str | None, typer.Option("--family", help="Family taxon name.")]
 GenusOption = Annotated[str | None, typer.Option("--genus", help="Genus taxon name.")]
 SpeciesOption = Annotated[str | None, typer.Option("--species", help="Species scientific name.")]
-TaxidOption = Annotated[int, typer.Option("--taxid", help="NCBI taxonomy ID.")]
+TaxidOption = Annotated[int | None, typer.Option("--taxid", help="NCBI taxonomy ID.")]
 YesOption = Annotated[bool, typer.Option("--yes", "-y", help="Skip confirmation prompt.")]
 RankOption = Annotated[
     str | None,
@@ -44,16 +51,39 @@ RankOption = Annotated[
 @app.command()
 def sync(
     marker: Annotated[Marker, typer.Option("--marker", case_sensitive=False)],
-    taxid: TaxidOption,
+    taxid: TaxidOption = None,
+    kingdom: KingdomOption = None,
+    phylum: PhylumOption = None,
+    class_name: ClassOption = None,
+    order: OrderOption = None,
+    family: FamilyOption = None,
+    genus: GenusOption = None,
+    species: SpeciesOption = None,
 ) -> None:
     """Synchronize matching GenBank records into the local cache."""
-    _run_user_command(lambda: _sync(marker, taxid))
+    _run_user_command(
+        lambda: _sync(
+            marker,
+            taxid,
+            kingdom,
+            phylum,
+            class_name,
+            order,
+            family,
+            genus,
+            species,
+        )
+    )
 
 
 @app.command()
 def build(
     marker: Annotated[Marker, typer.Option("--marker", case_sensitive=False)],
     outdir: Annotated[Path, typer.Option("--outdir")] = Path("."),
+    kingdom: KingdomOption = None,
+    phylum: PhylumOption = None,
+    class_name: ClassOption = None,
+    order: OrderOption = None,
     family: FamilyOption = None,
     genus: GenusOption = None,
     species: SpeciesOption = None,
@@ -78,6 +108,10 @@ def build(
         lambda: _build(
             marker,
             outdir,
+            kingdom,
+            phylum,
+            class_name,
+            order,
             family,
             genus,
             species,
@@ -153,9 +187,16 @@ def main() -> None:
 
 def _sync(
     marker: Marker,
-    taxid: int,
+    taxid: int | None,
+    kingdom: str | None,
+    phylum: str | None,
+    class_name: str | None,
+    order: str | None,
+    family: str | None,
+    genus: str | None,
+    species: str | None,
 ) -> None:
-    query = TaxonQuery(rank="taxid", name=str(taxid))
+    query = _sync_query(taxid, kingdom, phylum, class_name, order, family, genus, species)
     config = config_module.load_or_create_config()
     config_module.ensure_app_dirs(config)
     storage = Storage(config.database_path)
@@ -287,6 +328,10 @@ class TerminalDownloadReporter:
 def _build(
     marker: Marker,
     outdir: Path,
+    kingdom: str | None,
+    phylum: str | None,
+    class_name: str | None,
+    order: str | None,
     family: str | None,
     genus: str | None,
     species: str | None,
@@ -297,7 +342,15 @@ def _build(
     its_extraction_mode: ItsExtractionMode,
     tree_shrink_qc: bool,
 ) -> None:
-    query = _taxon_query(family, genus, species)
+    query = _constrained_taxon_query(
+        kingdom,
+        phylum,
+        class_name,
+        order,
+        family,
+        genus,
+        species,
+    )
     config = config_module.load_or_create_config()
     storage = Storage(config.database_path)
     report = build_dataset(
@@ -364,12 +417,12 @@ def _db_info(
         _validate_info_rank_filter(rank, query)
         payload = {
             "rank": rank,
-            "query": query.__dict__ if query else None,
+            "query": _query_payload(query),
             "taxa": storage.taxon_summaries(rank, query),
         }
     else:
         payload = {
-            "query": query.__dict__ if query else None,
+            "query": _query_payload(query),
             "markers": storage.marker_counts(query),
         }
     typer.echo(json.dumps(payload, ensure_ascii=False, indent=2))
@@ -402,7 +455,7 @@ def _db_remove(
     database_removed = storage.delete_cache_records(record.accession_root for record in records)
     taxonomy_removed = storage.delete_orphan_taxonomy()
     payload = {
-        "selector": {"accession": accession, "query": query.__dict__ if query else None},
+        "selector": {"accession": accession, "query": _query_payload(query)},
         "database_records_removed": database_removed,
         "files_removed": files_removed,
         "taxonomy_removed": taxonomy_removed,
@@ -482,6 +535,137 @@ def _config_list() -> None:
 def _config_set(key: str, value: str) -> None:
     config = config_module.set_config_value(key, value)
     typer.echo(json.dumps(config_module.config_as_dict(config), ensure_ascii=False, indent=2))
+
+
+LINEAGE_OPTION_ORDER = ("kingdom", "phylum", "class", "order", "family", "genus", "species")
+PRIMARY_TAXON_RANKS = ("family", "genus", "species")
+
+
+def _sync_query(
+    taxid: int | None,
+    kingdom: str | None,
+    phylum: str | None,
+    class_name: str | None,
+    order: str | None,
+    family: str | None,
+    genus: str | None,
+    species: str | None,
+) -> TaxonQuery:
+    constraints = _lineage_constraints(
+        kingdom,
+        phylum,
+        class_name,
+        order,
+        family,
+        genus,
+        species,
+    )
+    if taxid is not None:
+        return TaxonQuery(rank="taxid", name=str(taxid), constraints=constraints)
+    if constraints:
+        return _constrained_taxon_query(
+            kingdom,
+            phylum,
+            class_name,
+            order,
+            family,
+            genus,
+            species,
+        )
+    raise BarcodeKitError("provide --taxid or one of --family, --genus, or --species")
+
+
+def _constrained_taxon_query(
+    kingdom: str | None,
+    phylum: str | None,
+    class_name: str | None,
+    order: str | None,
+    family: str | None,
+    genus: str | None,
+    species: str | None,
+) -> TaxonQuery:
+    selected = _selected_lineage_values(
+        kingdom,
+        phylum,
+        class_name,
+        order,
+        family,
+        genus,
+        species,
+    )
+    primary = next(
+        ((rank, name) for rank, name in reversed(selected) if rank in PRIMARY_TAXON_RANKS),
+        None,
+    )
+    if primary is None:
+        raise BarcodeKitError("provide one of --family, --genus, or --species as the target taxon")
+    primary_rank, primary_name = primary
+    constraints = tuple(
+        TaxonConstraint(rank=rank, name=name)
+        for rank, name in selected
+        if rank != primary_rank
+    )
+    return TaxonQuery(rank=primary_rank, name=primary_name, constraints=constraints)
+
+
+def _lineage_constraints(
+    kingdom: str | None,
+    phylum: str | None,
+    class_name: str | None,
+    order: str | None,
+    family: str | None,
+    genus: str | None,
+    species: str | None,
+) -> tuple[TaxonConstraint, ...]:
+    return tuple(
+        TaxonConstraint(rank=rank, name=name)
+        for rank, name in _selected_lineage_values(
+            kingdom,
+            phylum,
+            class_name,
+            order,
+            family,
+            genus,
+            species,
+        )
+    )
+
+
+def _selected_lineage_values(
+    kingdom: str | None,
+    phylum: str | None,
+    class_name: str | None,
+    order: str | None,
+    family: str | None,
+    genus: str | None,
+    species: str | None,
+) -> list[tuple[str, str]]:
+    raw = {
+        "kingdom": kingdom,
+        "phylum": phylum,
+        "class": class_name,
+        "order": order,
+        "family": family,
+        "genus": genus,
+        "species": species,
+    }
+    return [
+        (rank, value.strip())
+        for rank in LINEAGE_OPTION_ORDER
+        if (value := raw[rank]) is not None and value.strip()
+    ]
+
+
+def _query_payload(query: TaxonQuery | None) -> dict[str, object] | None:
+    if query is None:
+        return None
+    payload: dict[str, object] = {"rank": query.rank, "name": query.name}
+    if query.constraints:
+        payload["constraints"] = [
+            {"rank": constraint.rank, "name": constraint.name}
+            for constraint in query.constraints
+        ]
+    return payload
 
 
 def _taxon_query(

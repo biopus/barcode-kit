@@ -14,7 +14,14 @@ from barcode_kit.config import AppConfig, BlastRescueConfig, ItsxrustConfig
 from barcode_kit.genbank import DownloadItem, DownloadReport, SyncService
 from barcode_kit.blast import BlastRescueResult, BlastSeed
 from barcode_kit.itsxrust import ItsxrustExtractionResult
-from barcode_kit.models import GenBankCacheRecord, ItsExtractionMode, Marker, TaxonQuery, TaxonomyRecord
+from barcode_kit.models import (
+    GenBankCacheRecord,
+    ItsExtractionMode,
+    Marker,
+    TaxonConstraint,
+    TaxonQuery,
+    TaxonomyRecord,
+)
 from barcode_kit.phylogeny import AlignmentProgram, TreeShrinkQcConfig, TreeShrinkResult
 from barcode_kit.storage import Storage
 
@@ -117,6 +124,23 @@ def test_sync_uses_expanded_taxid_organism_term(tmp_path: Path):
 
     assert result.remote_count == 0
     assert client.search_terms == ["txid58920[Organism:exp] AND rbcl"]
+
+
+def test_sync_adds_lineage_constraints_to_ncbi_search_term(tmp_path: Path):
+    config = _config(tmp_path)
+    storage = Storage(config.database_path)
+    client = FakeClient({})
+    service = SyncService(config, storage, FakeResolver(), client)
+    query = TaxonQuery(
+        "genus",
+        "Iris",
+        constraints=(TaxonConstraint(rank="kingdom", name="Viridiplantae"),),
+    )
+
+    result = service.sync(query, Marker.RBCL)
+
+    assert result.remote_count == 0
+    assert client.search_terms == ["Iris[Organism] AND Viridiplantae[Organism] AND rbcl"]
 
 
 def test_build_dataset_exports_fasta_and_report(tmp_path: Path, genbank_text):
