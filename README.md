@@ -26,30 +26,27 @@ uv run barcode-kit --help
 
 ## 配置
 
-首次使用前需要设置 NCBI E-utilities email。建议在开发和测试时用 `BARCODE_KIT_CONFIG` 指向临时配置，避免写入真实 home 目录。
+首次使用前需要设置 NCBI E-utilities email。默认配置文件是
+`~/.barcode-kit/config.toml`；开发和测试时建议用 `BARCODE_KIT_CONFIG` 指向临时配置，避免写入真实 home 目录。
 
-```bash
-BARCODE_KIT_CONFIG=/tmp/barcode-kit.toml \
-  uv run barcode-kit config set genbank.email user@example.com
-```
+```toml
+[paths]
+data_dir = "/path/to/barcode-kit-data"
 
-可选配置项：
+[collectors]
+batch_size = 500
+download_workers = 8
+timeout = 30
+retry_attempts = 3
 
-```bash
-uv run barcode-kit config set genbank.api_key YOUR_API_KEY
-uv run barcode-kit config set paths.data_dir /path/to/barcode-kit-data
-uv run barcode-kit config set collectors.batch_size 500
-uv run barcode-kit config set collectors.timeout 30
-uv run barcode-kit config set collectors.retry_attempts 3
-uv run barcode-kit config set build.tree_shrink_qc.quantile 0.05
-uv run barcode-kit config set build.tree_shrink_qc.bootstrap 1000
-uv run barcode-kit config set build.tree_shrink_qc.max_removed auto-select
-```
+[collectors.genbank]
+email = "user@example.com"
+api_key = ""
 
-查看当前有效配置：
-
-```bash
-uv run barcode-kit config list
+[build.tree_shrink_qc]
+quantile = 0.1
+bootstrap = 0
+max_removed = "auto-select"
 ```
 
 默认数据目录是 `~/.barcode-kit`，其中包含：
@@ -125,8 +122,9 @@ uv run barcode-kit build --genus Iris --marker rbcl \
 
 TreeShrink 的 `-k` 上限通过 `build.tree_shrink_qc.max_removed` 配置。默认值为 `auto-select`，表示沿用 TreeShrink 根据数据自动选择的上限；需要更激进时可设置为正整数，例如：
 
-```bash
-uv run barcode-kit config set build.tree_shrink_qc.max_removed 6
+```toml
+[build.tree_shrink_qc]
+max_removed = 6
 ```
 
 输出目录中会生成：
@@ -173,7 +171,7 @@ run_tree_shrink_qc(
 )
 ```
 
-`build_dataset()` 也可以显式开启 TreeShrink 质控。开启后会先输出候选 FASTA 到临时工作目录，依次运行 MAFFT、IQ-TREE 和 TreeShrink，再把 TreeShrink 标记的异常序列从最终 `<marker>.fasta` 中删除，并在 `build_report.json` 中记录排除原因。
+`build_dataset()` 也可以通过 `enable_tree_shrink_qc=True` 显式开启 TreeShrink 质控，质控参数来自 `AppConfig.tree_shrink_qc` 中的 `TreeShrinkConfig`。开启后会先输出候选 FASTA 到临时工作目录，依次运行 MAFFT、IQ-TREE 和 TreeShrink，再把 TreeShrink 标记的异常序列从最终 `<marker>.fasta` 中删除，并在 `build_report.json` 中记录排除原因。
 
 ### 查看本地缓存
 

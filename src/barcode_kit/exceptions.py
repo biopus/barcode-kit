@@ -1,3 +1,15 @@
+__all__ = [
+    "BarcodeKitError",
+    "BuildError",
+    "ConfigError",
+    "GenBankError",
+    "GenBankFetchError",
+    "GenBankSearchError",
+    "PhylogenyError",
+    "TaxonomyError",
+]
+
+
 class BarcodeKitError(Exception):
     """Base exception for user-facing toolkit failures."""
 

@@ -9,6 +9,9 @@ from typing import Any, TypeVar
 from barcode_kit.models import GenBankCacheRecord, Marker, TaxonQuery, TaxonomyRecord
 
 
+__all__ = ["Storage"]
+
+
 SCHEMA = """
 PRAGMA foreign_keys = ON;
 

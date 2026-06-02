@@ -8,7 +8,7 @@ from typing import Any
 from typer.testing import CliRunner
 
 from barcode_kit import cli
-from barcode_kit.config import AppConfig
+from barcode_kit.config import AppConfig, CollectorConfig
 from barcode_kit.genbank import SyncResult
 from barcode_kit.models import Marker, TaxonQuery
 
@@ -49,11 +49,10 @@ def test_sync_writes_live_download_rate_to_stderr_and_final_json_to_stdout(
 
     config = AppConfig(
         data_dir=tmp_path / "data",
-        batch_size=500,
-        download_workers=1,
-        timeout=30,
-        retry_attempts=3,
-        genbank_email="test@example.com",
+        collectors=CollectorConfig(
+            download_workers=1,
+            genbank_email="test@example.com",
+        ),
     )
     monkeypatch.setattr(cli.config_module, "load_or_create_config", lambda: config)
     monkeypatch.setattr(cli.config_module, "ensure_app_dirs", lambda config: None)
@@ -128,11 +127,10 @@ def test_sync_accepts_lineage_constrained_name_query(tmp_path: Path, monkeypatch
 
     config = AppConfig(
         data_dir=tmp_path / "data",
-        batch_size=500,
-        download_workers=1,
-        timeout=30,
-        retry_attempts=3,
-        genbank_email="test@example.com",
+        collectors=CollectorConfig(
+            download_workers=1,
+            genbank_email="test@example.com",
+        ),
     )
     monkeypatch.setattr(cli.config_module, "load_or_create_config", lambda: config)
     monkeypatch.setattr(cli.config_module, "ensure_app_dirs", lambda config: None)
@@ -178,11 +176,10 @@ def test_sync_accepts_taxid_query(tmp_path: Path, monkeypatch):
 
     config = AppConfig(
         data_dir=tmp_path / "data",
-        batch_size=500,
-        download_workers=1,
-        timeout=30,
-        retry_attempts=3,
-        genbank_email="test@example.com",
+        collectors=CollectorConfig(
+            download_workers=1,
+            genbank_email="test@example.com",
+        ),
     )
     monkeypatch.setattr(cli.config_module, "load_or_create_config", lambda: config)
     monkeypatch.setattr(cli.config_module, "ensure_app_dirs", lambda config: None)
@@ -202,7 +199,7 @@ def test_sync_accepts_taxid_query(tmp_path: Path, monkeypatch):
 def test_sync_creates_missing_config_file_before_running(tmp_path: Path, monkeypatch):
     class FakeSyncService:
         def __init__(self, config: AppConfig, storage: Any, taxonomy_resolver: Any):
-            assert config.batch_size == 500
+            assert config.collectors.batch_size == 500
 
         def sync(
             self,
@@ -228,14 +225,7 @@ def test_sync_creates_missing_config_file_before_running(tmp_path: Path, monkeyp
     config_path = tmp_path / "config.toml"
     data_dir = tmp_path / "data"
     monkeypatch.setenv("BARCODE_KIT_CONFIG", str(config_path))
-    monkeypatch.setattr(
-        cli.config_module,
-        "DEFAULT_CONFIG",
-        {
-            **cli.config_module.DEFAULT_CONFIG,
-            "paths": {"data_dir": str(data_dir)},
-        },
-    )
+    monkeypatch.setattr(cli.config_module, "DEFAULT_DATA_DIR", data_dir)
     monkeypatch.setattr(cli, "Storage", lambda path: object())
     monkeypatch.setattr(cli, "ETETaxonomyResolver", lambda: object())
     monkeypatch.setattr(cli, "SyncService", FakeSyncService)
@@ -257,11 +247,10 @@ def test_sync_rejects_trnl_trnf_marker(tmp_path: Path, monkeypatch):
 
     config = AppConfig(
         data_dir=tmp_path / "data",
-        batch_size=500,
-        download_workers=1,
-        timeout=30,
-        retry_attempts=3,
-        genbank_email="test@example.com",
+        collectors=CollectorConfig(
+            download_workers=1,
+            genbank_email="test@example.com",
+        ),
     )
     monkeypatch.setattr(cli.config_module, "load_config", lambda: config)
     monkeypatch.setattr(cli.config_module, "ensure_app_dirs", lambda config: None)

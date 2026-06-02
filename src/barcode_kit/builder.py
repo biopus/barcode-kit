@@ -10,36 +10,37 @@ from Bio.SeqRecord import SeqRecord
 from barcode_kit.blast import (
     BlastQuery,
     BlastRescueResult,
-    BlastRunner,
     BlastSeed,
     SubprocessBlastRunner,
 )
-from barcode_kit.config import AppConfig, ensure_app_dirs
+from barcode_kit.config import AppConfig, TreeShrinkConfig, ensure_app_dirs
 from barcode_kit.exceptions import BuildError
 from barcode_kit.itsxrust import (
     ItsxrustExtractionResult,
     ItsxrustInput,
-    ItsxrustRunner,
     SubprocessItsxrustRunner,
     default_hmm_path,
 )
-from barcode_kit.models import BuildReportEntry, ItsExtractionMode, Marker, SequenceQuality, TaxonQuery
+from barcode_kit.models import (
+    BuildReportEntry,
+    ItsExtractionMode,
+    Marker,
+    SequenceQuality,
+    TaxonQuery,
+    TaxonomyRecord,
+)
 from barcode_kit.parser import (
     annotation_marker_evidence,
     extract_marker,
     format_fasta_record,
     read_single_genbank,
 )
-from barcode_kit.phylogeny import (
-    AlignmentRunner,
-    TreeRunner,
-    TreeShrinkQcConfig,
-    TreeShrinkQcResult,
-    TreeShrinkRunner,
-    run_tree_shrink_qc,
-)
+from barcode_kit.phylogeny import TreeShrinkQcResult, run_tree_shrink_qc
 from barcode_kit.storage import Storage
 from barcode_kit.validation import sequence_quality
+
+
+__all__ = ["build_dataset"]
 
 
 def build_dataset(
@@ -54,13 +55,7 @@ def build_dataset(
     exclude_hybrid: bool = False,
     exclude_uncertain: bool = False,
     its_extraction_mode: ItsExtractionMode = ItsExtractionMode.HMM_BLAST,
-    itsxrust_runner: ItsxrustRunner | None = None,
-    its_hmm_path: Path | None = None,
-    blast_runner: BlastRunner | None = None,
-    tree_shrink_qc: TreeShrinkQcConfig | None = None,
-    alignment_runner: AlignmentRunner | None = None,
-    tree_runner: TreeRunner | None = None,
-    tree_shrink_runner: TreeShrinkRunner | None = None,
+    enable_tree_shrink_qc: bool = False,
 ) -> list[BuildReportEntry]:
     ensure_app_dirs(config)
     storage.initialize()
@@ -70,10 +65,7 @@ def build_dataset(
         raise BuildError(f"no cached {marker.value} records found for {query.rank} {query.name}")
 
     report: list[BuildReportEntry] = []
-    fasta_sequences: dict[int, Seq] = {}
-    itsxrust_runner = itsxrust_runner or SubprocessItsxrustRunner(config=config.itsxrust)
-    its_hmm_path = its_hmm_path or default_hmm_path()
-    blast_runner = blast_runner or SubprocessBlastRunner(config.blast_rescue)
+    fasta_sequences: list[Seq | None] = []
     if marker in {Marker.ITS, Marker.ITS2} and its_extraction_mode in {
         ItsExtractionMode.HMM_BLAST,
         ItsExtractionMode.ITSXRUST,
@@ -88,13 +80,10 @@ def build_dataset(
             max_ambiguous_content,
             exclude_hybrid,
             exclude_uncertain,
-            itsxrust_runner,
-            its_hmm_path,
-            blast_runner,
-            tree_shrink_qc,
-            alignment_runner,
-            tree_runner,
-            tree_shrink_runner,
+            SubprocessItsxrustRunner(config=config.itsxrust),
+            default_hmm_path(),
+            SubprocessBlastRunner(config.blast_rescue),
+            enable_tree_shrink_qc,
         )
 
     for index, (cache_record, taxonomy) in enumerate(candidates):
@@ -102,20 +91,15 @@ def build_dataset(
         reason: str | None = None
         quality: SequenceQuality | None = None
         sequence: Seq | None = None
-        metadata: dict[str, str | int | float | bool | None] = {
-            "taxon_id": taxonomy.taxon_id,
-            "marker": marker.value,
-            "is_hybrid": taxonomy.is_hybrid,
-            "is_uncertain": taxonomy.is_uncertain,
-        }
+        metadata = _candidate_metadata(marker, taxonomy)
+        reason = _excluded_candidate_reason(
+            path,
+            taxonomy,
+            exclude_hybrid=exclude_hybrid,
+            exclude_uncertain=exclude_uncertain,
+        )
 
-        if exclude_hybrid and taxonomy.is_hybrid:
-            reason = "hybrid excluded"
-        elif exclude_uncertain and taxonomy.is_uncertain:
-            reason = "uncertain taxon excluded"
-        elif not path.exists():
-            reason = "cached GenBank file missing"
-        else:
+        if reason is None:
             try:
                 record = read_single_genbank(path)
                 if marker in {Marker.ITS, Marker.ITS2}:
@@ -153,18 +137,15 @@ def build_dataset(
             metadata,
         )
         report.append(entry)
-        if entry.included and sequence is not None:
-            fasta_sequences[index] = sequence
+        fasta_sequences.append(sequence if entry.included else None)
 
     return _finalize_build_outputs(
         outdir,
         marker,
         report,
         fasta_sequences,
-        tree_shrink_qc,
-        alignment_runner,
-        tree_runner,
-        tree_shrink_runner,
+        config.tree_shrink_qc,
+        enable_tree_shrink_qc,
     )
 
 
@@ -177,6 +158,34 @@ class _PendingBlastRecord:
     metadata: dict[str, str | int | float | bool | None]
 
 
+def _candidate_metadata(
+    marker: Marker,
+    taxonomy: TaxonomyRecord,
+) -> dict[str, str | int | float | bool | None]:
+    return {
+        "taxon_id": taxonomy.taxon_id,
+        "marker": marker.value,
+        "is_hybrid": taxonomy.is_hybrid,
+        "is_uncertain": taxonomy.is_uncertain,
+    }
+
+
+def _excluded_candidate_reason(
+    path: Path,
+    taxonomy: TaxonomyRecord,
+    *,
+    exclude_hybrid: bool,
+    exclude_uncertain: bool,
+) -> str | None:
+    if exclude_hybrid and taxonomy.is_hybrid:
+        return "hybrid excluded"
+    if exclude_uncertain and taxonomy.is_uncertain:
+        return "uncertain taxon excluded"
+    if not path.exists():
+        return "cached GenBank file missing"
+    return None
+
+
 def _build_its_hmm_blast_dataset(
     config: AppConfig,
     candidates,
@@ -187,16 +196,13 @@ def _build_its_hmm_blast_dataset(
     max_ambiguous_content: float | None,
     exclude_hybrid: bool,
     exclude_uncertain: bool,
-    itsxrust_runner: ItsxrustRunner,
+    itsxrust_runner: SubprocessItsxrustRunner,
     hmm_path: Path,
-    blast_runner: BlastRunner,
-    tree_shrink_qc: TreeShrinkQcConfig | None,
-    alignment_runner: AlignmentRunner | None,
-    tree_runner: TreeRunner | None,
-    tree_shrink_runner: TreeShrinkRunner | None,
+    blast_runner: SubprocessBlastRunner,
+    enable_tree_shrink_qc: bool,
 ) -> list[BuildReportEntry]:
     report_slots: list[BuildReportEntry | None] = []
-    fasta_sequences: dict[int, Seq] = {}
+    fasta_sequences: list[Seq | None] = []
     itsxrust_records: list[_PendingBlastRecord] = []
     pending: list[_PendingBlastRecord] = []
     seeds: list[BlastSeed] = []
@@ -204,23 +210,18 @@ def _build_its_hmm_blast_dataset(
     for cache_record, taxonomy in candidates:
         index = len(report_slots)
         report_slots.append(None)
+        fasta_sequences.append(None)
         accession_version = cache_record.accession_version
         path = config.genbank_cache_dir / f"{accession_version}.gb"
-        metadata: dict[str, str | int | float | bool | None] = {
-            "taxon_id": taxonomy.taxon_id,
-            "marker": marker.value,
-            "is_hybrid": taxonomy.is_hybrid,
-            "is_uncertain": taxonomy.is_uncertain,
-        }
+        metadata = _candidate_metadata(marker, taxonomy)
 
-        reason: str | None = None
-        if exclude_hybrid and taxonomy.is_hybrid:
-            reason = "hybrid excluded"
-        elif exclude_uncertain and taxonomy.is_uncertain:
-            reason = "uncertain taxon excluded"
-        elif not path.exists():
-            reason = "cached GenBank file missing"
-        else:
+        reason = _excluded_candidate_reason(
+            path,
+            taxonomy,
+            exclude_hybrid=exclude_hybrid,
+            exclude_uncertain=exclude_uncertain,
+        )
+        if reason is None:
             try:
                 record = read_single_genbank(path)
                 annotation = annotation_marker_evidence(record, marker)
@@ -315,7 +316,7 @@ def _build_its_hmm_blast_dataset(
                 metadata,
             )
             report_slots[item.index] = entry
-            if entry.included and sequence is not None:
+            if entry.included:
                 fasta_sequences[item.index] = sequence
 
     if pending:
@@ -348,19 +349,23 @@ def _build_its_hmm_blast_dataset(
                 metadata,
             )
             report_slots[item.index] = entry
-            if entry.included and result.sequence is not None:
+            if entry.included:
                 fasta_sequences[item.index] = result.sequence
 
-    report = [entry for entry in report_slots if entry is not None]
+    report: list[BuildReportEntry] = []
+    included_sequences: list[Seq | None] = []
+    for index, entry in enumerate(report_slots):
+        if entry is None:
+            continue
+        report.append(entry)
+        included_sequences.append(fasta_sequences[index])
     return _finalize_build_outputs(
         outdir,
         marker,
         report,
-        fasta_sequences,
-        tree_shrink_qc,
-        alignment_runner,
-        tree_runner,
-        tree_shrink_runner,
+        included_sequences,
+        config.tree_shrink_qc,
+        enable_tree_shrink_qc,
     )
 
 
@@ -368,7 +373,7 @@ def _blast_rescue_pending_records(
     pending: list[_PendingBlastRecord],
     seeds: list[BlastSeed],
     marker: Marker,
-    blast_runner: BlastRunner,
+    blast_runner: SubprocessBlastRunner,
 ) -> dict[str, BlastRescueResult]:
     if not seeds:
         return {
@@ -438,18 +443,16 @@ def _finalize_build_outputs(
     outdir: Path,
     marker: Marker,
     report: list[BuildReportEntry],
-    fasta_sequences: dict[int, Seq],
-    tree_shrink_qc: TreeShrinkQcConfig | None,
-    alignment_runner: AlignmentRunner | None,
-    tree_runner: TreeRunner | None,
-    tree_shrink_runner: TreeShrinkRunner | None,
+    fasta_sequences: list[Seq | None],
+    tree_shrink_config: TreeShrinkConfig,
+    enable_tree_shrink_qc: bool,
 ) -> list[BuildReportEntry]:
     fasta_chunks = [
-        format_fasta_record(entry.output_id, fasta_sequences[index])
-        for index, entry in enumerate(report)
-        if entry.included and entry.output_id is not None and index in fasta_sequences
+        format_fasta_record(entry.output_id, sequence)
+        for entry, sequence in zip(report, fasta_sequences)
+        if entry.included and entry.output_id is not None and sequence is not None
     ]
-    if tree_shrink_qc is None or not fasta_chunks:
+    if not enable_tree_shrink_qc or not fasta_chunks:
         _write_build_outputs(outdir, marker, report, fasta_chunks)
         return report
 
@@ -461,12 +464,9 @@ def _finalize_build_outputs(
         input_fasta,
         outdir / f"{marker.value}.fasta",
         workdir,
-        quantile=tree_shrink_qc.quantile,
-        bootstrap=tree_shrink_qc.bootstrap,
-        max_removed=tree_shrink_qc.max_removed,
-        alignment_runner=alignment_runner,
-        tree_runner=tree_runner,
-        tree_shrink_runner=tree_shrink_runner,
+        quantile=tree_shrink_config.quantile,
+        bootstrap=tree_shrink_config.bootstrap,
+        max_removed=tree_shrink_config.max_removed,
     )
     updated_report = _mark_tree_shrink_outliers(report, qc_result)
     _write_build_report(outdir, updated_report)

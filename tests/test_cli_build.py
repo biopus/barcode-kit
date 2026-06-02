@@ -6,9 +6,8 @@ from typing import Any
 from typer.testing import CliRunner
 
 from barcode_kit import cli
-from barcode_kit.config import AppConfig
+from barcode_kit.config import AppConfig, TreeShrinkConfig
 from barcode_kit.models import BuildReportEntry, Marker, TaxonQuery
-from barcode_kit.phylogeny import TreeShrinkQcConfig
 
 
 def test_build_creates_missing_config_file_before_running(tmp_path: Path, monkeypatch):
@@ -20,7 +19,7 @@ def test_build_creates_missing_config_file_before_running(tmp_path: Path, monkey
         outdir: Path,
         **kwargs: Any,
     ) -> list[BuildReportEntry]:
-        assert config.batch_size == 500
+        assert config.collectors.batch_size == 500
         assert query == TaxonQuery("genus", "Iris")
         assert marker is Marker.ITS
         return []
@@ -28,14 +27,7 @@ def test_build_creates_missing_config_file_before_running(tmp_path: Path, monkey
     config_path = tmp_path / "config.toml"
     data_dir = tmp_path / "data"
     monkeypatch.setenv("BARCODE_KIT_CONFIG", str(config_path))
-    monkeypatch.setattr(
-        cli.config_module,
-        "DEFAULT_CONFIG",
-        {
-            **cli.config_module.DEFAULT_CONFIG,
-            "paths": {"data_dir": str(data_dir)},
-        },
-    )
+    monkeypatch.setattr(cli.config_module, "DEFAULT_DATA_DIR", data_dir)
     monkeypatch.setattr(cli, "Storage", lambda path: object())
     monkeypatch.setattr(cli, "build_dataset", fake_build_dataset)
 
@@ -69,14 +61,7 @@ def test_build_accepts_lineage_constraints_for_taxon_query(tmp_path: Path, monke
     config_path = tmp_path / "config.toml"
     data_dir = tmp_path / "data"
     monkeypatch.setenv("BARCODE_KIT_CONFIG", str(config_path))
-    monkeypatch.setattr(
-        cli.config_module,
-        "DEFAULT_CONFIG",
-        {
-            **cli.config_module.DEFAULT_CONFIG,
-            "paths": {"data_dir": str(data_dir)},
-        },
-    )
+    monkeypatch.setattr(cli.config_module, "DEFAULT_DATA_DIR", data_dir)
     monkeypatch.setattr(cli, "Storage", lambda path: object())
     monkeypatch.setattr(cli, "build_dataset", fake_build_dataset)
 
@@ -98,7 +83,7 @@ def test_build_accepts_lineage_constraints_for_taxon_query(tmp_path: Path, monke
     assert result.exit_code == 0, result.output
 
 
-def test_build_passes_treeshrink_qc_options(tmp_path: Path, monkeypatch):
+def test_build_enables_treeshrink_qc_using_config_options(tmp_path: Path, monkeypatch):
     def fake_build_dataset(
         config: AppConfig,
         storage: Any,
@@ -107,7 +92,9 @@ def test_build_passes_treeshrink_qc_options(tmp_path: Path, monkeypatch):
         outdir: Path,
         **kwargs: Any,
     ) -> list[BuildReportEntry]:
-        assert kwargs["tree_shrink_qc"] == TreeShrinkQcConfig(
+        assert "tree_shrink_qc" not in kwargs
+        assert kwargs["enable_tree_shrink_qc"] is True
+        assert config.tree_shrink_qc == TreeShrinkConfig(
             quantile=0.01,
             bootstrap=1000,
             max_removed=6,

@@ -8,6 +8,13 @@ from barcode_kit.exceptions import TaxonomyError
 from barcode_kit.models import TaxonomyRecord
 
 
+__all__ = [
+    "ETETaxonomyResolver",
+    "is_hybrid",
+    "is_uncertain",
+]
+
+
 UNCERTAIN_RE = re.compile(
     r"\b(?:sp|cf|aff)\.(?=\s|$)|\b(?:unidentified|unknown|uncultured)\b",
     re.IGNORECASE,

@@ -5,6 +5,9 @@ from Bio.Seq import Seq
 from barcode_kit.models import SequenceQuality
 
 
+__all__ = ["sequence_quality"]
+
+
 def sequence_quality(sequence: Seq | str) -> SequenceQuality:
     seq = str(sequence).upper().replace(" ", "").replace("\n", "")
     length = len(seq)

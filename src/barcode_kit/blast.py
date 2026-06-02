@@ -7,13 +7,25 @@ from collections import defaultdict
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Protocol
 
 from Bio.Seq import Seq
 
 from barcode_kit.config import BlastRescueConfig, BlastRescueMarkerConfig
 from barcode_kit.models import Marker
 from barcode_kit.parser import format_fasta_record
+
+
+__all__ = [
+    "BlastHit",
+    "BlastQuery",
+    "BlastRescueDecision",
+    "BlastRescueResult",
+    "BlastSeed",
+    "SubprocessBlastRunner",
+    "extract_query_span",
+    "parse_blast_tabular",
+    "select_blast_rescue_hit",
+]
 
 
 MAKEBLASTDB_COMMAND = "makeblastdb"
@@ -65,16 +77,6 @@ class BlastRescueResult:
     sequence: Seq | None
     fallback_reason: str | None
     metadata: dict[str, str | int | float | bool | None] = field(default_factory=dict)
-
-
-class BlastRunner(Protocol):
-    def rescue(
-        self,
-        failed_records: Sequence[BlastQuery],
-        seeds: Sequence[BlastSeed],
-        marker: Marker,
-    ) -> dict[str, BlastRescueResult]:
-        ...
 
 
 def select_blast_rescue_hit(

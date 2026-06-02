@@ -17,16 +17,29 @@ from barcode_kit.builder import build_dataset
 from barcode_kit.exceptions import BarcodeKitError
 from barcode_kit.genbank import SyncService
 from barcode_kit.models import ItsExtractionMode, Marker, TaxonConstraint, TaxonQuery
-from barcode_kit.phylogeny import TreeShrinkQcConfig
 from barcode_kit.storage import Storage
 from barcode_kit.taxonomy import ETETaxonomyResolver
 
 
+__all__ = [
+    "DownloadProgressState",
+    "TerminalDownloadReporter",
+    "app",
+    "build",
+    "db_app",
+    "db_clear",
+    "db_info",
+    "db_prune",
+    "db_remove",
+    "db_status",
+    "main",
+    "sync",
+]
+
+
 app = typer.Typer(help="Build local GenBank-backed DNA barcode datasets.")
 db_app = typer.Typer(help="Inspect the local cache database.")
-config_app = typer.Typer(help="Inspect or update barcode-kit configuration.")
 app.add_typer(db_app, name="db")
-app.add_typer(config_app, name="config")
 DOWNLOAD_PROGRESS_INTERVAL_SECONDS = 0.5
 
 
@@ -169,18 +182,6 @@ def db_prune(yes: YesOption = False) -> None:
     _run_user_command(lambda: _db_prune(yes))
 
 
-@config_app.command("list")
-def config_list() -> None:
-    """Print the effective configuration as JSON."""
-    _run_user_command(lambda: _config_list())
-
-
-@config_app.command("set")
-def config_set(key: str, value: str) -> None:
-    """Set a configuration value."""
-    _run_user_command(lambda: _config_set(key, value))
-
-
 def main() -> None:
     app()
 
@@ -212,9 +213,7 @@ def _sync(
     finally:
         reporter.stop()
         service.close()
-    typer.echo(
-        json.dumps(asdict(result), ensure_ascii=False, indent=2)
-    )
+    _echo_json(asdict(result))
     if result.failed:
         raise typer.Exit(code=2)
 
@@ -246,8 +245,7 @@ class DownloadProgressState:
             self._recent_bytes += bytes_delta
             self._prune_byte_events()
 
-    def record_downloaded_record(self, accession: str) -> None:
-        del accession
+    def record_downloaded_record(self, _accession: str) -> None:
         with self._lock:
             self.completed_records += 1
 
@@ -364,29 +362,17 @@ def _build(
         exclude_hybrid=exclude_hybrid,
         exclude_uncertain=exclude_uncertain,
         its_extraction_mode=its_extraction_mode,
-        tree_shrink_qc=(
-            TreeShrinkQcConfig(
-                quantile=config.tree_shrink_qc.quantile,
-                bootstrap=config.tree_shrink_qc.bootstrap,
-                max_removed=config.tree_shrink_qc.max_removed,
-            )
-            if tree_shrink_qc
-            else None
-        ),
+        enable_tree_shrink_qc=tree_shrink_qc,
     )
     included = sum(1 for entry in report if entry.included)
-    typer.echo(
-        json.dumps(
-            {
-                "outdir": str(outdir),
-                "marker": marker.value,
-                "records": len(report),
-                "included": included,
-                "excluded": len(report) - included,
-            },
-            ensure_ascii=False,
-            indent=2,
-        )
+    _echo_json(
+        {
+            "outdir": str(outdir),
+            "marker": marker.value,
+            "records": len(report),
+            "included": included,
+            "excluded": len(report) - included,
+        }
     )
 
 
@@ -399,7 +385,7 @@ def _db_status() -> None:
         "genbank_cache_dir": str(config.genbank_cache_dir),
         **storage.counts(),
     }
-    typer.echo(json.dumps(payload, ensure_ascii=False, indent=2))
+    _echo_json(payload)
 
 
 def _db_info(
@@ -425,7 +411,7 @@ def _db_info(
             "query": _query_payload(query),
             "markers": storage.marker_counts(query),
         }
-    typer.echo(json.dumps(payload, ensure_ascii=False, indent=2))
+    _echo_json(payload)
 
 
 def _db_remove(
@@ -460,7 +446,7 @@ def _db_remove(
         "files_removed": files_removed,
         "taxonomy_removed": taxonomy_removed,
     }
-    typer.echo(json.dumps(payload, ensure_ascii=False, indent=2))
+    _echo_json(payload)
 
 
 def _db_clear(yes: bool) -> None:
@@ -485,7 +471,7 @@ def _db_clear(yes: bool) -> None:
         "files_removed": files_removed,
         "taxonomy_removed": deleted["taxonomy"],
     }
-    typer.echo(json.dumps(payload, ensure_ascii=False, indent=2))
+    _echo_json(payload)
 
 
 def _db_prune(yes: bool) -> None:
@@ -523,18 +509,11 @@ def _db_prune(yes: bool) -> None:
         "files_removed": files_removed,
         "taxonomy_removed": taxonomy_removed,
     }
+    _echo_json(payload)
+
+
+def _echo_json(payload: object) -> None:
     typer.echo(json.dumps(payload, ensure_ascii=False, indent=2))
-
-
-def _config_list() -> None:
-    path = config_module.ensure_config_file()
-    config = config_module.load_config(path)
-    typer.echo(json.dumps(config_module.config_as_dict(config), ensure_ascii=False, indent=2))
-
-
-def _config_set(key: str, value: str) -> None:
-    config = config_module.set_config_value(key, value)
-    typer.echo(json.dumps(config_module.config_as_dict(config), ensure_ascii=False, indent=2))
 
 
 LINEAGE_OPTION_ORDER = ("kingdom", "phylum", "class", "order", "family", "genus", "species")

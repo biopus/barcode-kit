@@ -5,11 +5,22 @@ import subprocess
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
-from typing import Protocol
 
 from Bio import SeqIO
 
 from barcode_kit.exceptions import PhylogenyError
+
+
+__all__ = [
+    "AlignmentProgram",
+    "SubprocessAlignmentRunner",
+    "SubprocessTreeRunner",
+    "SubprocessTreeShrinkRunner",
+    "SubprocessTrimalRunner",
+    "TreeShrinkQcResult",
+    "TreeShrinkResult",
+    "run_tree_shrink_qc",
+]
 
 
 class AlignmentProgram(StrEnum):
@@ -36,13 +47,6 @@ class TreeShrinkResult:
 
 
 @dataclass(frozen=True)
-class TreeShrinkQcConfig:
-    quantile: float = 0.05
-    bootstrap: int = 0
-    max_removed: int | None = None
-
-
-@dataclass(frozen=True)
 class TreeShrinkQcResult:
     removed_taxa: set[str]
     output_fasta: Path
@@ -50,42 +54,6 @@ class TreeShrinkQcResult:
     tree_path: Path
     tree_shrink_output_dir: Path
     removed_taxa_path: Path
-
-
-class AlignmentRunner(Protocol):
-    def align(
-        self,
-        input_path: Path,
-        output_path: Path,
-        *,
-        program: AlignmentProgram,
-        threads: int,
-    ) -> Path:
-        ...
-
-
-class TreeRunner(Protocol):
-    def build_tree(
-        self,
-        input_path: Path,
-        output_path: Path,
-        *,
-        bootstrap: int,
-    ) -> Path:
-        ...
-
-
-class TreeShrinkRunner(Protocol):
-    def detect_outliers(
-        self,
-        tree_path: Path,
-        output_dir: Path,
-        *,
-        output_prefix: str = "output",
-        quantile: float = 0.05,
-        max_removed: int | None = None,
-    ) -> TreeShrinkResult:
-        ...
 
 
 class SubprocessAlignmentRunner:
@@ -237,9 +205,9 @@ def run_tree_shrink_qc(
     quantile: float = 0.05,
     bootstrap: int = 0,
     max_removed: int | None = None,
-    alignment_runner: AlignmentRunner | None = None,
-    tree_runner: TreeRunner | None = None,
-    tree_shrink_runner: TreeShrinkRunner | None = None,
+    alignment_runner: SubprocessAlignmentRunner | None = None,
+    tree_runner: SubprocessTreeRunner | None = None,
+    tree_shrink_runner: SubprocessTreeShrinkRunner | None = None,
 ) -> TreeShrinkQcResult:
     workdir = Path(workdir)
     workdir.mkdir(parents=True, exist_ok=True)

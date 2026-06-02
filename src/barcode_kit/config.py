@@ -2,61 +2,30 @@ from __future__ import annotations
 
 import os
 import tomllib
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
 from barcode_kit.exceptions import ConfigError
 
 
+__all__ = [
+    "AppConfig",
+    "BlastRescueConfig",
+    "BlastRescueMarkerConfig",
+    "CollectorConfig",
+    "DEFAULT_DATA_DIR",
+    "ItsxrustConfig",
+    "TreeShrinkConfig",
+    "config_as_dict",
+    "ensure_app_dirs",
+    "load_config",
+    "load_or_create_config",
+    "write_config",
+]
+
+
 DEFAULT_DATA_DIR = Path.home() / ".barcode-kit"
-DEFAULT_CONFIG = {
-    "paths": {"data_dir": str(DEFAULT_DATA_DIR)},
-    "collectors": {
-        "batch_size": 500,
-        "download_workers": 8,
-        "timeout": 30,
-        "retry_attempts": 3,
-        "genbank": {
-            "email": "",
-            "api_key": "",
-        },
-    },
-    "build": {
-        "itsxrust": {
-            "inc_e": 0.01,
-            "min_anchor_score": 8,
-            "max_per_anchor": 20,
-            "max_anchor_evalue": 0.01,
-        },
-        "blast_rescue": {
-            "blastn_dust": "no",
-            "word_size": 11,
-            "evalue": 1e-3,
-            "endpoint_margin_bases": 15,
-            "endpoint_margin_fraction": 0.05,
-            "ambiguous_bitscore_ratio": 0.95,
-            "ambiguous_overlap_ratio": 0.80,
-            "its": {
-                "min_subject_coverage": 0.85,
-                "min_identity": 0.80,
-                "min_query_length_ratio": 0.85,
-                "max_query_length_ratio": 1.20,
-            },
-            "its2": {
-                "min_subject_coverage": 0.90,
-                "min_identity": 0.85,
-                "min_query_length_ratio": 0.90,
-                "max_query_length_ratio": 1.15,
-            },
-        },
-        "tree_shrink_qc": {
-            "quantile": 0.1,
-            "bootstrap": 0,
-            "max_removed": "auto-select",
-        },
-    },
-}
 
 
 @dataclass(frozen=True)
@@ -72,7 +41,7 @@ class BlastRescueConfig:
     blastn_dust: str = "no"
     word_size: int = 11
     evalue: float = 1e-3
-    endpoint_margin_bases: int = 30
+    endpoint_margin_bases: int = 15
     endpoint_margin_fraction: float = 0.05
     ambiguous_bitscore_ratio: float = 0.95
     ambiguous_overlap_ratio: float = 0.80
@@ -80,16 +49,16 @@ class BlastRescueConfig:
         default_factory=lambda: BlastRescueMarkerConfig(
             min_subject_coverage=0.85,
             min_identity=0.80,
-            min_query_length_ratio=0.75,
-            max_query_length_ratio=1.30,
+            min_query_length_ratio=0.85,
+            max_query_length_ratio=1.20,
         )
     )
     its2: BlastRescueMarkerConfig = field(
         default_factory=lambda: BlastRescueMarkerConfig(
             min_subject_coverage=0.90,
             min_identity=0.85,
-            min_query_length_ratio=0.70,
-            max_query_length_ratio=1.35,
+            min_query_length_ratio=0.90,
+            max_query_length_ratio=1.15,
         )
     )
 
@@ -103,24 +72,29 @@ class ItsxrustConfig:
 
 
 @dataclass(frozen=True)
-class TreeShrinkBuildConfig:
-    quantile: float = 0.05
+class TreeShrinkConfig:
+    quantile: float = 0.1
     bootstrap: int = 0
     max_removed: int | None = None
 
 
 @dataclass(frozen=True)
-class AppConfig:
-    data_dir: Path
-    batch_size: int
-    download_workers: int
-    timeout: float
-    retry_attempts: int
-    genbank_email: str
+class CollectorConfig:
+    batch_size: int = 500
+    download_workers: int = 8
+    timeout: float = 30
+    retry_attempts: int = 3
+    genbank_email: str = ""
     genbank_api_key: str | None = None
+
+
+@dataclass(frozen=True)
+class AppConfig:
+    data_dir: Path = field(default_factory=lambda: DEFAULT_DATA_DIR)
+    collectors: CollectorConfig = field(default_factory=CollectorConfig)
     blast_rescue: BlastRescueConfig = field(default_factory=BlastRescueConfig)
     itsxrust: ItsxrustConfig = field(default_factory=ItsxrustConfig)
-    tree_shrink_qc: TreeShrinkBuildConfig = field(default_factory=TreeShrinkBuildConfig)
+    tree_shrink_qc: TreeShrinkConfig = field(default_factory=TreeShrinkConfig)
 
     @property
     def database_path(self) -> Path:
@@ -139,22 +113,20 @@ class AppConfig:
         return self.data_dir / "logs"
 
 
-def default_config_path() -> Path:
-    return Path(os.environ.get("BARCODE_KIT_CONFIG", DEFAULT_DATA_DIR / "config.toml"))
-
-
 def load_config(path: Path | None = None) -> AppConfig:
-    path = path or default_config_path()
-    if path.exists():
-        raw = _deep_merge(DEFAULT_CONFIG, _read_toml(path))
-    else:
-        raw = DEFAULT_CONFIG
-    return _parse_config(raw)
+    path = path or Path(os.environ.get("BARCODE_KIT_CONFIG", DEFAULT_DATA_DIR / "config.toml"))
+    if not path.exists():
+        return AppConfig()
+    return _parse_config(_read_toml(path))
 
 
 def load_or_create_config(path: Path | None = None) -> AppConfig:
-    path = ensure_config_file(path)
-    return load_config(path)
+    path = path or Path(os.environ.get("BARCODE_KIT_CONFIG", DEFAULT_DATA_DIR / "config.toml"))
+    config = load_config(path)
+    ensure_app_dirs(config)
+    if not path.exists():
+        write_config(config, path)
+    return config
 
 
 def ensure_app_dirs(config: AppConfig) -> None:
@@ -163,83 +135,23 @@ def ensure_app_dirs(config: AppConfig) -> None:
     config.logs_dir.mkdir(parents=True, exist_ok=True)
 
 
-def ensure_config_file(path: Path | None = None) -> Path:
-    path = path or default_config_path()
-    config = load_config(path)
-    ensure_app_dirs(config)
-    if not path.exists():
-        write_config(config, path)
-    return path
-
-
 def write_config(config: AppConfig, path: Path | None = None) -> None:
     path = path or config.config_path
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(_toml_dump(config_as_dict(config)), encoding="utf-8")
 
 
-def set_config_value(key: str, value: str, path: Path | None = None) -> AppConfig:
-    path = path or default_config_path()
-    raw = _deep_merge(DEFAULT_CONFIG, _read_toml(path) if path.exists() else {})
-    parts = key.split(".")
-    parts_tuple = tuple(parts)
-    if parts_tuple not in {
-        ("paths", "data_dir"),
-        ("collectors", "batch_size"),
-        ("collectors", "download_workers"),
-        ("collectors", "timeout"),
-        ("collectors", "retry_attempts"),
-        ("collectors", "genbank", "email"),
-        ("collectors", "genbank", "api_key"),
-        ("genbank", "email"),
-        ("genbank", "api_key"),
-        ("build", "itsxrust", "inc_e"),
-        ("build", "itsxrust", "min_anchor_score"),
-        ("build", "itsxrust", "max_per_anchor"),
-        ("build", "itsxrust", "max_anchor_evalue"),
-        ("build", "blast_rescue", "blastn_dust"),
-        ("build", "blast_rescue", "word_size"),
-        ("build", "blast_rescue", "evalue"),
-        ("build", "blast_rescue", "endpoint_margin_bases"),
-        ("build", "blast_rescue", "endpoint_margin_fraction"),
-        ("build", "blast_rescue", "ambiguous_bitscore_ratio"),
-        ("build", "blast_rescue", "ambiguous_overlap_ratio"),
-        ("build", "blast_rescue", "its", "min_subject_coverage"),
-        ("build", "blast_rescue", "its", "min_identity"),
-        ("build", "blast_rescue", "its", "min_query_length_ratio"),
-        ("build", "blast_rescue", "its", "max_query_length_ratio"),
-        ("build", "blast_rescue", "its2", "min_subject_coverage"),
-        ("build", "blast_rescue", "its2", "min_identity"),
-        ("build", "blast_rescue", "its2", "min_query_length_ratio"),
-        ("build", "blast_rescue", "its2", "max_query_length_ratio"),
-        ("build", "tree_shrink_qc", "quantile"),
-        ("build", "tree_shrink_qc", "bootstrap"),
-        ("build", "tree_shrink_qc", "max_removed"),
-    }:
-        raise ConfigError(f"unknown config key: {key}")
-    if parts[0] == "genbank":
-        parts = ["collectors", "genbank", *parts[1:]]
-    current: dict[str, Any] = raw
-    for part in parts[:-1]:
-        current = current.setdefault(part, {})
-    current[parts[-1]] = _coerce_config_value(key, value)
-    config = _parse_config(raw)
-    ensure_app_dirs(config)
-    write_config(config, path)
-    return config
-
-
 def config_as_dict(config: AppConfig) -> dict[str, Any]:
     return {
         "paths": {"data_dir": str(config.data_dir)},
         "collectors": {
-            "batch_size": config.batch_size,
-            "download_workers": config.download_workers,
-            "timeout": config.timeout,
-            "retry_attempts": config.retry_attempts,
+            "batch_size": config.collectors.batch_size,
+            "download_workers": config.collectors.download_workers,
+            "timeout": config.collectors.timeout,
+            "retry_attempts": config.collectors.retry_attempts,
             "genbank": {
-                "email": config.genbank_email,
-                "api_key": config.genbank_api_key or "",
+                "email": config.collectors.genbank_email,
+                "api_key": config.collectors.genbank_api_key or "",
             },
         },
         "build": {
@@ -257,14 +169,16 @@ def config_as_dict(config: AppConfig) -> dict[str, Any]:
                 "endpoint_margin_fraction": config.blast_rescue.endpoint_margin_fraction,
                 "ambiguous_bitscore_ratio": config.blast_rescue.ambiguous_bitscore_ratio,
                 "ambiguous_overlap_ratio": config.blast_rescue.ambiguous_overlap_ratio,
-                "its": _blast_marker_config_as_dict(config.blast_rescue.its),
-                "its2": _blast_marker_config_as_dict(config.blast_rescue.its2),
+                "its": asdict(config.blast_rescue.its),
+                "its2": asdict(config.blast_rescue.its2),
             },
             "tree_shrink_qc": {
                 "quantile": config.tree_shrink_qc.quantile,
                 "bootstrap": config.tree_shrink_qc.bootstrap,
-                "max_removed": _tree_shrink_max_removed_as_config_value(
-                    config.tree_shrink_qc.max_removed
+                "max_removed": (
+                    "auto-select"
+                    if config.tree_shrink_qc.max_removed is None
+                    else config.tree_shrink_qc.max_removed
                 ),
             },
         },
@@ -286,176 +200,93 @@ def _parse_config(raw: dict[str, Any]) -> AppConfig:
     itsxrust = build.get("itsxrust", {})
     blast_rescue = build.get("blast_rescue", {})
     tree_shrink_qc = build.get("tree_shrink_qc", {})
-    return AppConfig(
-        data_dir=Path(str(paths.get("data_dir") or DEFAULT_DATA_DIR)).expanduser(),
-        batch_size=int(collectors.get("batch_size", 500)),
-        download_workers=int(collectors.get("download_workers", 1)),
-        timeout=float(collectors.get("timeout", 30)),
-        retry_attempts=int(collectors.get("retry_attempts", 3)),
-        genbank_email=str(genbank.get("email", "")),
-        genbank_api_key=str(genbank.get("api_key") or "") or None,
-        blast_rescue=_parse_blast_rescue_config(blast_rescue),
-        itsxrust=_parse_itsxrust_config(itsxrust),
-        tree_shrink_qc=_parse_tree_shrink_build_config(tree_shrink_qc),
-    )
 
+    app_kwargs: dict[str, Any] = {}
+    if "data_dir" in paths:
+        app_kwargs["data_dir"] = Path(str(paths["data_dir"])).expanduser()
 
-def _coerce_config_value(key: str, value: str) -> str | int | float:
-    if key == "build.tree_shrink_qc.max_removed":
-        normalized = value.strip().lower()
-        if normalized in {"auto", "auto-select"}:
-            return "auto-select"
-        return int(value)
-    if key.endswith(
-        (
-            "batch_size",
-            "download_workers",
-            "retry_attempts",
-            "endpoint_margin_bases",
+    collector_kwargs = {
+        key: collectors[key]
+        for key in ("batch_size", "download_workers", "timeout", "retry_attempts")
+        if key in collectors
+    }
+    if "email" in genbank:
+        collector_kwargs["genbank_email"] = str(genbank["email"])
+    if "api_key" in genbank:
+        collector_kwargs["genbank_api_key"] = str(genbank["api_key"] or "") or None
+
+    blast_rescue_kwargs = {
+        key: blast_rescue[key]
+        for key in (
+            "blastn_dust",
             "word_size",
-            "min_anchor_score",
-            "max_per_anchor",
-            "bootstrap",
-        )
-    ):
-        return int(value)
-    if key.endswith(
-        (
-            "timeout",
             "evalue",
-            "inc_e",
-            "max_anchor_evalue",
+            "endpoint_margin_bases",
             "endpoint_margin_fraction",
             "ambiguous_bitscore_ratio",
             "ambiguous_overlap_ratio",
-            "min_subject_coverage",
-            "min_identity",
-            "min_query_length_ratio",
-            "max_query_length_ratio",
-            "quantile",
         )
-    ):
-        return float(value)
-    return value
+        if key in blast_rescue
+    }
+    if "its" in blast_rescue:
+        blast_rescue_kwargs["its"] = replace(BlastRescueConfig().its, **blast_rescue["its"])
+    if "its2" in blast_rescue:
+        blast_rescue_kwargs["its2"] = replace(BlastRescueConfig().its2, **blast_rescue["its2"])
 
-
-def _parse_blast_rescue_config(raw: dict[str, Any]) -> BlastRescueConfig:
-    return BlastRescueConfig(
-        blastn_dust=str(raw.get("blastn_dust", "no")),
-        word_size=int(raw.get("word_size", 11)),
-        evalue=float(raw.get("evalue", 1e-3)),
-        endpoint_margin_bases=int(raw.get("endpoint_margin_bases", 30)),
-        endpoint_margin_fraction=float(raw.get("endpoint_margin_fraction", 0.05)),
-        ambiguous_bitscore_ratio=float(raw.get("ambiguous_bitscore_ratio", 0.95)),
-        ambiguous_overlap_ratio=float(raw.get("ambiguous_overlap_ratio", 0.80)),
-        its=_parse_blast_marker_config(
-            raw.get("its", {}),
-            BlastRescueMarkerConfig(0.85, 0.80, 0.75, 1.30),
-        ),
-        its2=_parse_blast_marker_config(
-            raw.get("its2", {}),
-            BlastRescueMarkerConfig(0.90, 0.85, 0.70, 1.35),
-        ),
-    )
-
-
-def _parse_itsxrust_config(raw: dict[str, Any]) -> ItsxrustConfig:
-    return ItsxrustConfig(
-        inc_e=float(raw.get("inc_e", 0.01)),
-        min_anchor_score=int(raw.get("min_anchor_score", 8)),
-        max_per_anchor=int(raw.get("max_per_anchor", 20)),
-        max_anchor_evalue=float(raw.get("max_anchor_evalue", 0.01)),
-    )
-
-
-def _parse_tree_shrink_build_config(raw: dict[str, Any]) -> TreeShrinkBuildConfig:
-    return TreeShrinkBuildConfig(
-        quantile=float(raw.get("quantile", 0.05)),
-        bootstrap=int(raw.get("bootstrap", 0)),
-        max_removed=_parse_tree_shrink_max_removed(raw.get("max_removed", "auto-select")),
-    )
-
-
-def _parse_tree_shrink_max_removed(value: Any) -> int | None:
-    if isinstance(value, str) and value.strip().lower() in {"auto", "auto-select"}:
-        return None
-    parsed = int(value)
-    if parsed < 1:
-        raise ConfigError(
-            "build.tree_shrink_qc.max_removed must be a positive integer or auto-select"
-        )
-    return parsed
-
-
-def _tree_shrink_max_removed_as_config_value(value: int | None) -> int | str:
-    return "auto-select" if value is None else value
-
-
-def _parse_blast_marker_config(
-    raw: dict[str, Any],
-    defaults: BlastRescueMarkerConfig,
-) -> BlastRescueMarkerConfig:
-    return BlastRescueMarkerConfig(
-        min_subject_coverage=float(
-            raw.get("min_subject_coverage", defaults.min_subject_coverage)
-        ),
-        min_identity=float(raw.get("min_identity", defaults.min_identity)),
-        min_query_length_ratio=float(
-            raw.get("min_query_length_ratio", defaults.min_query_length_ratio)
-        ),
-        max_query_length_ratio=float(
-            raw.get("max_query_length_ratio", defaults.max_query_length_ratio)
-        ),
-    )
-
-
-def _blast_marker_config_as_dict(config: BlastRescueMarkerConfig) -> dict[str, float]:
-    return {
-        "min_subject_coverage": config.min_subject_coverage,
-        "min_identity": config.min_identity,
-        "min_query_length_ratio": config.min_query_length_ratio,
-        "max_query_length_ratio": config.max_query_length_ratio,
+    itsxrust_kwargs = {
+        key: itsxrust[key]
+        for key in ("inc_e", "min_anchor_score", "max_per_anchor", "max_anchor_evalue")
+        if key in itsxrust
     }
 
+    tree_shrink_kwargs = {
+        key: tree_shrink_qc[key]
+        for key in ("quantile", "bootstrap")
+        if key in tree_shrink_qc
+    }
+    if "max_removed" in tree_shrink_qc:
+        max_removed = tree_shrink_qc["max_removed"]
+        tree_shrink_kwargs["max_removed"] = (
+            None
+            if isinstance(max_removed, str)
+            and max_removed.strip().lower() in {"auto", "auto-select"}
+            else max_removed
+        )
 
-def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
-    result: dict[str, Any] = {}
-    for key, value in base.items():
-        if isinstance(value, dict):
-            result[key] = _deep_merge(value, override.get(key, {}))
-        else:
-            result[key] = value
-    for key, value in override.items():
-        if isinstance(value, dict) and isinstance(result.get(key), dict):
-            result[key] = _deep_merge(result[key], value)
-        else:
-            result[key] = value
-    return result
+    return AppConfig(
+        **app_kwargs,
+        collectors=CollectorConfig(**collector_kwargs),
+        blast_rescue=BlastRescueConfig(**blast_rescue_kwargs),
+        itsxrust=ItsxrustConfig(**itsxrust_kwargs),
+        tree_shrink_qc=TreeShrinkConfig(**tree_shrink_kwargs),
+    )
 
 
 def _toml_dump(data: dict[str, Any]) -> str:
+    def format_value(value: Any) -> str:
+        if isinstance(value, bool):
+            return "true" if value else "false"
+        if isinstance(value, (int, float)):
+            return str(value)
+        escaped = str(value).replace("\\", "\\\\").replace('"', '\\"')
+        return f'"{escaped}"'
+
+    def write_table(lines: list[str], table: dict[str, Any], prefix: list[str]) -> None:
+        scalar_items = [
+            (key, value) for key, value in table.items() if not isinstance(value, dict)
+        ]
+        child_items = [
+            (key, value) for key, value in table.items() if isinstance(value, dict)
+        ]
+        if prefix:
+            if lines:
+                lines.append("")
+            lines.append(f"[{'.'.join(prefix)}]")
+        for key, value in scalar_items:
+            lines.append(f"{key} = {format_value(value)}")
+        for key, value in child_items:
+            write_table(lines, value, [*prefix, key])
+
     lines: list[str] = []
-    _write_table(lines, data, [])
+    write_table(lines, data, [])
     return "\n".join(lines).rstrip() + "\n"
-
-
-def _write_table(lines: list[str], table: dict[str, Any], prefix: list[str]) -> None:
-    scalar_items = [(key, value) for key, value in table.items() if not isinstance(value, dict)]
-    child_items = [(key, value) for key, value in table.items() if isinstance(value, dict)]
-    if prefix:
-        if lines:
-            lines.append("")
-        lines.append(f"[{'.'.join(prefix)}]")
-    for key, value in scalar_items:
-        lines.append(f"{key} = {_format_toml_value(value)}")
-    for key, value in child_items:
-        _write_table(lines, value, [*prefix, key])
-
-
-def _format_toml_value(value: Any) -> str:
-    if isinstance(value, bool):
-        return "true" if value else "false"
-    if isinstance(value, (int, float)):
-        return str(value)
-    escaped = str(value).replace("\\", "\\\\").replace('"', '\\"')
-    return f'"{escaped}"'

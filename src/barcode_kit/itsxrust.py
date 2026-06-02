@@ -6,7 +6,6 @@ import tempfile
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
 
 from Bio import SeqIO
 from Bio.Seq import Seq
@@ -15,6 +14,14 @@ from Bio.SeqRecord import SeqRecord
 from barcode_kit.config import ItsxrustConfig
 from barcode_kit.models import Marker
 from barcode_kit.parser import format_fasta_record
+
+
+__all__ = [
+    "ItsxrustExtractionResult",
+    "ItsxrustInput",
+    "SubprocessItsxrustRunner",
+    "default_hmm_path",
+]
 
 
 @dataclass(frozen=True)
@@ -29,39 +36,10 @@ class ItsxrustInput:
     record: SeqRecord
 
 
-class ItsxrustRunner(Protocol):
-    def extract_many(
-        self,
-        records: Sequence[ItsxrustInput],
-        marker: Marker,
-        hmm_path: Path,
-    ) -> dict[str, ItsxrustExtractionResult]:
-        ...
-
-    def extract(
-        self,
-        record: SeqRecord,
-        accession_version: str,
-        marker: Marker,
-        hmm_path: Path,
-    ) -> ItsxrustExtractionResult:
-        ...
-
-
 class SubprocessItsxrustRunner:
     def __init__(self, batch_size: int = 1000, config: ItsxrustConfig | None = None):
         self.batch_size = batch_size
         self.config = config or ItsxrustConfig()
-
-    def extract(
-        self,
-        record: SeqRecord,
-        accession_version: str,
-        marker: Marker,
-        hmm_path: Path,
-    ) -> ItsxrustExtractionResult:
-        results = self.extract_many([ItsxrustInput(accession_version, record)], marker, hmm_path)
-        return results[accession_version]
 
     def extract_many(
         self,

@@ -6,7 +6,7 @@ from pathlib import Path
 from typer.testing import CliRunner
 
 from barcode_kit.cli import app
-from barcode_kit.config import AppConfig, write_config
+from barcode_kit.config import AppConfig, CollectorConfig, write_config
 from barcode_kit.models import GenBankCacheRecord, TaxonomyRecord
 from barcode_kit.storage import Storage
 
@@ -202,11 +202,10 @@ def _write_test_config(tmp_path: Path, monkeypatch) -> AppConfig:
     config_path = tmp_path / "config.toml"
     config = AppConfig(
         data_dir=tmp_path / "data",
-        batch_size=500,
-        download_workers=1,
-        timeout=30,
-        retry_attempts=3,
-        genbank_email="test@example.com",
+        collectors=CollectorConfig(
+            download_workers=1,
+            genbank_email="test@example.com",
+        ),
     )
     monkeypatch.setenv("BARCODE_KIT_CONFIG", str(config_path))
     write_config(config, config_path)

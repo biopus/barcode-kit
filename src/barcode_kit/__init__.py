@@ -1,5 +1,6 @@
 """Barcode Toolkit v1."""
 
+from barcode_kit.config import TreeShrinkConfig
 from barcode_kit.models import (
     BuildReportEntry,
     GenBankCacheRecord,
@@ -14,7 +15,6 @@ from barcode_kit.phylogeny import (
     SubprocessTreeRunner,
     SubprocessTreeShrinkRunner,
     SubprocessTrimalRunner,
-    TreeShrinkQcConfig,
     TreeShrinkQcResult,
     TreeShrinkResult,
     run_tree_shrink_qc,
@@ -32,7 +32,7 @@ __all__ = [
     "SubprocessTrimalRunner",
     "TaxonQuery",
     "TaxonomyRecord",
-    "TreeShrinkQcConfig",
+    "TreeShrinkConfig",
     "TreeShrinkQcResult",
     "TreeShrinkResult",
     "run_tree_shrink_qc",

@@ -6,35 +6,22 @@ from barcode_kit import config as config_module
 from barcode_kit.cli import app
 
 
-def test_config_set_and_list(tmp_path, monkeypatch):
-    config_path = tmp_path / "config.toml"
-    data_dir = tmp_path / "data"
-    monkeypatch.setenv("BARCODE_KIT_CONFIG", str(config_path))
+def test_cli_does_not_expose_config_command():
     runner = CliRunner()
 
-    result = runner.invoke(app, ["config", "set", "paths.data_dir", str(data_dir)])
-    assert result.exit_code == 0, result.output
+    help_result = runner.invoke(app, ["--help"])
+    config_result = runner.invoke(app, ["config", "list"])
 
-    result = runner.invoke(app, ["config", "set", "collectors.genbank.email", "user@example.com"])
-    assert result.exit_code == 0, result.output
-
-    result = runner.invoke(app, ["config", "list"])
-    assert result.exit_code == 0, result.output
-    assert "user@example.com" in result.output
-    assert str(data_dir) in result.output
+    assert help_result.exit_code == 0, help_result.output
+    assert "config" not in help_result.output
+    assert config_result.exit_code != 0
+    assert "No such command" in config_result.output
 
 
 def test_load_or_create_config_writes_blast_rescue_defaults(tmp_path, monkeypatch):
     config_path = tmp_path / "config.toml"
     data_dir = tmp_path / "data"
-    monkeypatch.setattr(
-        config_module,
-        "DEFAULT_CONFIG",
-        {
-            **config_module.DEFAULT_CONFIG,
-            "paths": {"data_dir": str(data_dir)},
-        },
-    )
+    monkeypatch.setattr(config_module, "DEFAULT_DATA_DIR", data_dir)
 
     config = config_module.load_or_create_config(config_path)
 
@@ -63,70 +50,30 @@ def test_load_or_create_config_writes_blast_rescue_defaults(tmp_path, monkeypatc
     assert "blastn_outfmt" not in contents
 
 
-def test_config_set_updates_blast_rescue_values(tmp_path, monkeypatch):
+def test_load_config_reads_partial_file_with_dataclass_defaults(tmp_path):
     config_path = tmp_path / "config.toml"
-    monkeypatch.setenv("BARCODE_KIT_CONFIG", str(config_path))
-    runner = CliRunner()
-
-    result = runner.invoke(
-        app,
-        ["config", "set", "build.blast_rescue.its.min_identity", "0.92"],
+    config_path.write_text(
+        "\n".join(
+            [
+                "[collectors.genbank]",
+                'email = "user@example.com"',
+                "",
+                "[build.blast_rescue.its]",
+                "min_identity = 0.92",
+                "",
+            ]
+        ),
+        encoding="utf-8",
     )
 
-    assert result.exit_code == 0, result.output
     config = config_module.load_config(config_path)
+
+    assert config.collectors.genbank_email == "user@example.com"
+    assert config.collectors.batch_size == 500
+    assert config.collectors.download_workers == 8
     assert config.blast_rescue.its.min_identity == 0.92
-
-
-def test_config_set_updates_blast_and_itsxrust_values(tmp_path, monkeypatch):
-    config_path = tmp_path / "config.toml"
-    monkeypatch.setenv("BARCODE_KIT_CONFIG", str(config_path))
-    runner = CliRunner()
-
-    blast_result = runner.invoke(
-        app,
-        ["config", "set", "build.blast_rescue.word_size", "15"],
-    )
-    itsxrust_result = runner.invoke(
-        app,
-        ["config", "set", "build.itsxrust.max_per_anchor", "30"],
-    )
-
-    assert blast_result.exit_code == 0, blast_result.output
-    assert itsxrust_result.exit_code == 0, itsxrust_result.output
-    config = config_module.load_config(config_path)
-    assert config.blast_rescue.word_size == 15
-    assert config.itsxrust.max_per_anchor == 30
-
-
-def test_config_set_updates_tree_shrink_qc_values(tmp_path, monkeypatch):
-    config_path = tmp_path / "config.toml"
-    monkeypatch.setenv("BARCODE_KIT_CONFIG", str(config_path))
-    runner = CliRunner()
-
-    result = runner.invoke(
-        app,
-        ["config", "set", "build.tree_shrink_qc.quantile", "0.01"],
-    )
-    bootstrap_result = runner.invoke(
-        app,
-        ["config", "set", "build.tree_shrink_qc.bootstrap", "1000"],
-    )
-    max_removed_result = runner.invoke(
-        app,
-        ["config", "set", "build.tree_shrink_qc.max_removed", "6"],
-    )
-    auto_select_result = runner.invoke(
-        app,
-        ["config", "set", "build.tree_shrink_qc.max_removed", "auto-select"],
-    )
-
-    assert result.exit_code == 0, result.output
-    assert bootstrap_result.exit_code == 0, bootstrap_result.output
-    assert max_removed_result.exit_code == 0, max_removed_result.output
-    assert auto_select_result.exit_code == 0, auto_select_result.output
-    config = config_module.load_config(config_path)
-    assert config.tree_shrink_qc.quantile == 0.01
-    assert config.tree_shrink_qc.bootstrap == 1000
-    assert config.tree_shrink_qc.max_removed is None
-    assert 'max_removed = "auto-select"' in config_path.read_text(encoding="utf-8")
+    assert config.blast_rescue.its.min_subject_coverage == 0.85
+    assert config.blast_rescue.its.min_query_length_ratio == 0.85
+    assert config.blast_rescue.its.max_query_length_ratio == 1.20
+    assert not hasattr(config_module, "_deep_merge")
+    assert not hasattr(config_module, "DEFAULT_CONFIG")

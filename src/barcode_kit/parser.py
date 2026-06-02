@@ -15,6 +15,26 @@ from barcode_kit.exceptions import GenBankError
 from barcode_kit.models import Marker
 
 
+__all__ = [
+    "AccessionVersion",
+    "AnnotationMarkerEvidence",
+    "ParsedGenBankRecord",
+    "accession_from_record",
+    "annotation_marker_evidence",
+    "detect_markers",
+    "extract_its",
+    "extract_marker",
+    "format_fasta_record",
+    "parse_accession_version",
+    "parse_genbank_file",
+    "parse_genbank_record",
+    "parse_genbank_text",
+    "read_single_genbank",
+    "source_organism",
+    "source_taxon_id",
+]
+
+
 ACCESSION_RE = re.compile(r"^(?P<root>[A-Za-z_]+\d+)(?:\.(?P<version>\d+))?$")
 
 

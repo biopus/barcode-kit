@@ -35,6 +35,19 @@ from barcode_kit.parser import (
 from barcode_kit.storage import Storage
 
 
+__all__ = [
+    "DownloadItem",
+    "DownloadProgressCallback",
+    "DownloadReport",
+    "DownloadStatus",
+    "DownloadedRecordCallback",
+    "NCBIGenBankClient",
+    "RequestLimiter",
+    "SyncResult",
+    "SyncService",
+]
+
+
 BASE_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/"
 FILENAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
 DownloadStatus = Literal["pending", "succeeded", "failed"]
@@ -97,25 +110,9 @@ class DownloadItem:
         self.retryable = retryable
 
 
-@dataclass(frozen=True, init=False)
+@dataclass(frozen=True)
 class DownloadReport:
     items: dict[str, DownloadItem]
-
-    def __init__(
-        self,
-        items: dict[str, DownloadItem] | None = None,
-        *,
-        succeeded: dict[str, DownloadItem] | None = None,
-        failed: dict[str, DownloadItem] | None = None,
-    ):
-        combined: dict[str, DownloadItem] = {}
-        if items:
-            combined.update(items)
-        if succeeded:
-            combined.update(succeeded)
-        if failed:
-            combined.update(failed)
-        object.__setattr__(self, "items", combined)
 
     @property
     def succeeded(self) -> dict[str, DownloadItem]:
@@ -430,12 +427,12 @@ class SyncService:
         self.storage = storage
         self.taxonomy_resolver = taxonomy_resolver
         self.client = client or NCBIGenBankClient(
-            email=config.genbank_email,
-            api_key=config.genbank_api_key,
-            batch_size=config.batch_size,
-            timeout=config.timeout,
-            retry_attempts=config.retry_attempts,
-            download_workers=config.download_workers,
+            email=config.collectors.genbank_email,
+            api_key=config.collectors.genbank_api_key,
+            batch_size=config.collectors.batch_size,
+            timeout=config.collectors.timeout,
+            retry_attempts=config.collectors.retry_attempts,
+            download_workers=config.collectors.download_workers,
         )
 
     def sync(self, query: TaxonQuery, marker: Marker, progress: Any | None = None) -> SyncResult:
