@@ -11,6 +11,7 @@ __all__ = [
     "Marker",
     "SequenceQuality",
     "TaxonConstraint",
+    "TaxonExclusion",
     "TaxonQuery",
     "TaxonomyRecord",
 ]
@@ -43,6 +44,16 @@ class Marker(StrEnum):
     @property
     def is_coding(self) -> bool:
         return self in {Marker.MATK, Marker.RBCL}
+
+
+class TaxonExclusion(StrEnum):
+    HYBRID = "hybrid"
+    UNCERTAIN = "uncertain"
+    SUBSPECIES = "subspecies"
+    VARIETY = "variety"
+    FORMA = "forma"
+    CULTIVAR = "cultivar"
+    INFRASPECIFIC = "infraspecific"
 
 
 @dataclass(frozen=True)

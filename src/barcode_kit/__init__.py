@@ -6,6 +6,7 @@ from barcode_kit.models import (
     GenBankCacheRecord,
     Marker,
     SequenceQuality,
+    TaxonExclusion,
     TaxonQuery,
     TaxonomyRecord,
 )
@@ -23,6 +24,7 @@ __all__ = [
     "GenBankCacheRecord",
     "Marker",
     "SequenceQuality",
+    "TaxonExclusion",
     "TaxonQuery",
     "TaxonomyRecord",
     "TreeRunner",

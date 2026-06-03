@@ -24,6 +24,7 @@ from barcode_kit.models import (
     GenBankCacheRecord,
     Marker,
     TaxonConstraint,
+    TaxonExclusion,
     TaxonQuery,
     TaxonomyRecord,
 )
@@ -203,6 +204,65 @@ def test_build_dataset_excludes_records_above_max_ambiguous_content(
     assert report[0].reason == "ambiguous base content above max_ambiguous_content"
     assert report[0].quality is not None
     assert report[0].quality.ambiguous_content == 0.5
+
+
+def test_build_dataset_excludes_selected_infraspecific_rank(tmp_path: Path, genbank_text):
+    config = _config(tmp_path)
+    storage = Storage(config.database_path)
+    storage.initialize()
+    config.genbank_cache_dir.mkdir(parents=True, exist_ok=True)
+    (config.genbank_cache_dir / "VAR000001.1.gb").write_text(
+        genbank_text(accession="VAR000001", version=1, organism="Iris japonica var. alba", taxon_id=111),
+        encoding="utf-8",
+    )
+    (config.genbank_cache_dir / "SPC000001.1.gb").write_text(
+        genbank_text(accession="SPC000001", version=1, organism="Iris japonica", taxon_id=222),
+        encoding="utf-8",
+    )
+    with storage.connect() as connection:
+        storage.upsert_taxonomy(
+            TaxonomyRecord(
+                taxon_id=111,
+                scientific_name="Iris japonica var. alba",
+                family="Iridaceae",
+                genus="Iris",
+                species="japonica",
+                infraspecific_rank="variety",
+            ),
+            connection,
+        )
+        storage.upsert_taxonomy(
+            TaxonomyRecord(
+                taxon_id=222,
+                scientific_name="Iris japonica",
+                family="Iridaceae",
+                genus="Iris",
+                species="japonica",
+            ),
+            connection,
+        )
+        storage.upsert_genbank_cache(
+            GenBankCacheRecord("VAR000001", 1, "VAR000001.1", 111, has_rbcl=True),
+            connection,
+        )
+        storage.upsert_genbank_cache(
+            GenBankCacheRecord("SPC000001", 1, "SPC000001.1", 222, has_rbcl=True),
+            connection,
+        )
+
+    report = build_dataset(
+        config,
+        storage,
+        TaxonQuery("genus", "Iris"),
+        Marker.RBCL,
+        tmp_path / "out",
+        exclude={TaxonExclusion.VARIETY},
+    )
+
+    by_accession = {entry.accession_version: entry for entry in report}
+    assert by_accession["VAR000001.1"].included is False
+    assert by_accession["VAR000001.1"].reason == "variety excluded"
+    assert by_accession["SPC000001.1"].included is True
 
 
 def test_build_dataset_exports_raw_records_without_treeshrink_qc(

@@ -22,6 +22,13 @@ UNCERTAIN_RE = re.compile(
 
 HYBRID_RE = re.compile(r"(×|\bx\b|\bhybrid\b|notho)", re.IGNORECASE)
 LINEAGE_RANKS = ("kingdom", "phylum", "class", "order", "family", "genus", "species")
+INFRASPECIFIC_RANKS = {
+    "subspecies": "subspecies",
+    "varietas": "variety",
+    "variety": "variety",
+    "forma": "forma",
+    "cultivar": "cultivar",
+}
 
 
 class ETETaxonomyResolver:
@@ -31,8 +38,9 @@ class ETETaxonomyResolver:
 
     def standardize(self, scientific_name: str, taxon_id_hint: int | None = None) -> TaxonomyRecord:
         taxon_id, standardized_name = self._name_to_taxid(scientific_name, taxon_id_hint)
-        lineage_by_rank = self._lineage_by_rank(taxon_id)
-        resolved_name = lineage_by_rank.get("species") or standardized_name or scientific_name
+        lineage_by_rank, current_rank = self._lineage_by_rank(taxon_id)
+        resolved_name = standardized_name or lineage_by_rank.get("species") or scientific_name
+        species_name = lineage_by_rank.get("species") or resolved_name
         return TaxonomyRecord(
             taxon_id=taxon_id,
             scientific_name=resolved_name,
@@ -42,7 +50,8 @@ class ETETaxonomyResolver:
             order=lineage_by_rank.get("order"),
             family=lineage_by_rank.get("family"),
             genus=lineage_by_rank.get("genus"),
-            species=_species_epithet(resolved_name),
+            species=_species_epithet(species_name),
+            infraspecific_rank=INFRASPECIFIC_RANKS.get(current_rank or ""),
             is_hybrid=is_hybrid(scientific_name) or is_hybrid(resolved_name),
             is_uncertain=is_uncertain(scientific_name),
         )
@@ -60,7 +69,7 @@ class ETETaxonomyResolver:
         taxon_id = int(taxids[0])
         return taxon_id, scientific_name
 
-    def _lineage_by_rank(self, taxon_id: int) -> dict[str, str]:
+    def _lineage_by_rank(self, taxon_id: int) -> tuple[dict[str, str], str | None]:
         try:
             lineage = [int(value) for value in self.ncbi.get_lineage(taxon_id)]
         except Exception as error:
@@ -80,7 +89,7 @@ class ETETaxonomyResolver:
         }
         if not lineage_by_rank:
             raise TaxonomyError(f"ETE returned invalid lineage metadata for {taxon_id}")
-        return lineage_by_rank
+        return lineage_by_rank, ranks_by_taxid.get(taxon_id)
 
     def _translated_name(self, taxon_id: int) -> str | None:
         try:

@@ -107,8 +107,9 @@ uv run barcode-kit build --kingdom Viridiplantae --genus Iris --marker rbcl --ou
 uv run barcode-kit build --kingdom Viridiplantae --genus Iris --marker rbcl \
   --min-length 500 \
   --max-ambiguous-content 0.05 \
-  --exclude-hybrid \
-  --exclude-uncertain \
+  --exclude hybrid \
+  --exclude uncertain \
+  --exclude variety \
   --outdir ./out
 ```
 

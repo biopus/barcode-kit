@@ -16,7 +16,7 @@ from barcode_kit import config as config_module
 from barcode_kit.builder import build_dataset
 from barcode_kit.exceptions import BarcodeKitError
 from barcode_kit.genbank import SyncService
-from barcode_kit.models import Marker, TaxonConstraint, TaxonQuery
+from barcode_kit.models import Marker, TaxonConstraint, TaxonExclusion, TaxonQuery
 from barcode_kit.storage import Storage
 from barcode_kit.taxonomy import ETETaxonomyResolver
 from barcode_kit.validation import tree_shrink_qc
@@ -59,6 +59,10 @@ YesOption = Annotated[bool, typer.Option("--yes", "-y", help="Skip confirmation 
 RankOption = Annotated[
     str | None,
     typer.Option("--rank", help="List cached taxa at rank: family, genus, or species."),
+]
+ExcludeOption = Annotated[
+    list[TaxonExclusion] | None,
+    typer.Option("--exclude", case_sensitive=False, help="Exclude taxon class from build output."),
 ]
 
 
@@ -104,10 +108,9 @@ def build(
     min_length: Annotated[int | None, typer.Option("--min-length")] = None,
     max_ambiguous_content: Annotated[
         float | None,
-        typer.Option("--max-ambiguous-content"),
+        typer.Option("--max-ambiguous"),
     ] = None,
-    exclude_hybrid: Annotated[bool, typer.Option("--exclude-hybrid")] = False,
-    exclude_uncertain: Annotated[bool, typer.Option("--exclude-uncertain")] = False,
+    exclude: ExcludeOption = None,
     enable_tree_shrink_qc: Annotated[
         bool,
         typer.Option("--tree-shrink-qc", help="Run MAFFT, IQ-TREE, and TreeShrink long-branch QC."),
@@ -127,8 +130,7 @@ def build(
             species,
             min_length,
             max_ambiguous_content,
-            exclude_hybrid,
-            exclude_uncertain,
+            exclude,
             enable_tree_shrink_qc,
         )
     )
@@ -331,8 +333,7 @@ def _build(
     species: str | None,
     min_length: int | None,
     max_ambiguous_content: float | None,
-    exclude_hybrid: bool,
-    exclude_uncertain: bool,
+    exclude: list[TaxonExclusion] | None,
     enable_tree_shrink_qc: bool,
 ) -> None:
     query = _constrained_taxon_query(
@@ -354,8 +355,7 @@ def _build(
         outdir,
         min_length=min_length,
         max_ambiguous_content=max_ambiguous_content,
-        exclude_hybrid=exclude_hybrid,
-        exclude_uncertain=exclude_uncertain,
+        exclude=set(exclude or []),
     )
     if enable_tree_shrink_qc:
         report = tree_shrink_qc(outdir, marker, report, config.tree_shrink_qc)

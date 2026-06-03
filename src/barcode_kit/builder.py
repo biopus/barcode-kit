@@ -25,6 +25,7 @@ from barcode_kit.models import (
     GenBankCacheRecord,
     Marker,
     SequenceQuality,
+    TaxonExclusion,
     TaxonQuery,
     TaxonomyRecord,
 )
@@ -50,8 +51,7 @@ def build_dataset(
     *,
     min_length: int | None = None,
     max_ambiguous_content: float | None = None,
-    exclude_hybrid: bool = False,
-    exclude_uncertain: bool = False,
+    exclude: set[TaxonExclusion] | None = None,
 ) -> list[BuildReportEntry]:
     ensure_app_dirs(config)
     storage.initialize()
@@ -68,8 +68,7 @@ def build_dataset(
             outdir,
             min_length=min_length,
             max_ambiguous_content=max_ambiguous_content,
-            exclude_hybrid=exclude_hybrid,
-            exclude_uncertain=exclude_uncertain,
+            exclude=exclude or set(),
         )
 
     if marker.is_coding:
@@ -80,8 +79,7 @@ def build_dataset(
             outdir,
             min_length=min_length,
             max_ambiguous_content=max_ambiguous_content,
-            exclude_hybrid=exclude_hybrid,
-            exclude_uncertain=exclude_uncertain,
+            exclude=exclude or set(),
         )
 
     raise BuildError(f"unsupported marker: {marker.value}")
@@ -98,8 +96,7 @@ def _build_its_dataset(
     *,
     min_length: int | None,
     max_ambiguous_content: float | None,
-    exclude_hybrid: bool,
-    exclude_uncertain: bool,
+    exclude: set[TaxonExclusion],
 ) -> list[BuildReportEntry]:
     report_slots: list[BuildReportEntry | None] = []
     fasta_sequences: list[Seq | None] = []
@@ -123,8 +120,7 @@ def _build_its_dataset(
         reason = _meta_info_qc(
             path,
             taxonomy,
-            exclude_hybrid=exclude_hybrid,
-            exclude_uncertain=exclude_uncertain,
+            exclude=exclude,
         )
         if reason is None:
             try:
@@ -345,8 +341,7 @@ def _build_annotation_dataset(
     *,
     min_length: int | None,
     max_ambiguous_content: float | None,
-    exclude_hybrid: bool,
-    exclude_uncertain: bool,
+    exclude: set[TaxonExclusion],
 ) -> list[BuildReportEntry]:
     report: list[BuildReportEntry] = []
     fasta_sequences: list[Seq | None] = []
@@ -364,8 +359,7 @@ def _build_annotation_dataset(
         reason = _meta_info_qc(
             path,
             taxonomy,
-            exclude_hybrid=exclude_hybrid,
-            exclude_uncertain=exclude_uncertain,
+            exclude=exclude,
         )
 
         if reason is None:
@@ -419,13 +413,17 @@ def _meta_info_qc(
     path: Path,
     taxonomy: TaxonomyRecord,
     *,
-    exclude_hybrid: bool,
-    exclude_uncertain: bool,
+    exclude: set[TaxonExclusion],
 ) -> str | None:
-    if exclude_hybrid and taxonomy.is_hybrid:
+    if TaxonExclusion.HYBRID in exclude and taxonomy.is_hybrid:
         return "hybrid excluded"
-    if exclude_uncertain and taxonomy.is_uncertain:
+    if TaxonExclusion.UNCERTAIN in exclude and taxonomy.is_uncertain:
         return "uncertain taxon excluded"
+    rank = taxonomy.infraspecific_rank
+    if rank and TaxonExclusion.INFRASPECIFIC in exclude:
+        return "infraspecific taxon excluded"
+    if rank and rank in exclude:
+        return f"{rank} excluded"
     if not path.exists():
         return "cached GenBank file missing"
     return None

@@ -76,6 +76,35 @@ def test_ete_resolver_prefers_taxon_id_hint():
     assert record.scientific_name == "Iris japonica"
 
 
+def test_ete_resolver_keeps_current_infraspecific_taxon_name():
+    class SubspeciesNCBI(FakeNCBITaxa):
+        def get_lineage(self, taxid: int) -> list[int]:
+            self.lineage_requests.append(taxid)
+            return [33090, 35493, 3398, 73496, 58920, 26379, 12345, 54321]
+
+        def get_rank(self, taxids: list[int]) -> dict[int, str]:
+            self.rank_requests.append(taxids)
+            ranks = super().get_rank(taxids)
+            ranks[54321] = "subspecies"
+            return ranks
+
+        def get_taxid_translator(self, taxids: list[int]) -> dict[int, str]:
+            self.taxid_requests.append(taxids)
+            names = super().get_taxid_translator(taxids)
+            names[54321] = "Iris japonica subsp. formosana"
+            return names
+
+    record = ETETaxonomyResolver(ncbi=SubspeciesNCBI()).standardize(
+        "submitted name",
+        taxon_id_hint=54321,
+    )
+
+    assert record.taxon_id == 54321
+    assert record.scientific_name == "Iris japonica subsp. formosana"
+    assert record.species == "japonica"
+    assert record.infraspecific_rank == "subspecies"
+
+
 def test_ete_resolver_raises_when_name_cannot_be_resolved():
     class UnresolvedNCBI(FakeNCBITaxa):
         def get_name_translator(self, names: list[str]) -> dict[str, list[int]]:
