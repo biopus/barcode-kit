@@ -37,10 +37,8 @@ from barcode_kit.storage import Storage
 
 __all__ = [
     "DownloadItem",
-    "DownloadProgressCallback",
     "DownloadReport",
     "DownloadStatus",
-    "DownloadedRecordCallback",
     "NCBIGenBankClient",
     "RequestLimiter",
     "SyncResult",
@@ -51,8 +49,6 @@ __all__ = [
 BASE_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/"
 FILENAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
 DownloadStatus = Literal["pending", "succeeded", "failed"]
-DownloadProgressCallback = Callable[[int], None]
-DownloadedRecordCallback = Callable[[str], None]
 
 
 def _build_ncbi_session() -> requests.Session:
@@ -193,8 +189,8 @@ class NCBIGenBankClient:
         accessions: list[str],
         output_dir: Path,
         *,
-        progress_callback: DownloadProgressCallback | None = None,
-        record_callback: DownloadedRecordCallback | None = None,
+        progress_callback: Callable[[int], None] | None = None,
+        record_callback: Callable[[str], None] | None = None,
     ) -> DownloadReport:
         output_dir.mkdir(parents=True, exist_ok=True)
         items: dict[str, DownloadItem] = {}
@@ -269,8 +265,8 @@ class NCBIGenBankClient:
         output_dir: Path,
         session: requests.Session | Any,
         *,
-        progress_callback: DownloadProgressCallback | None = None,
-        record_callback: DownloadedRecordCallback | None = None,
+        progress_callback: Callable[[int], None] | None = None,
+        record_callback: Callable[[str], None] | None = None,
     ) -> DownloadReport:
         requested = {item.accession for item in batch}
         item_by_accession = {item.accession: item for item in batch}
@@ -566,7 +562,7 @@ def _iter_genbank_record_texts(
     response: Any,
     chunk_size: int = 64 * 1024,
     *,
-    progress_callback: DownloadProgressCallback | None = None,
+    progress_callback: Callable[[int], None] | None = None,
 ) -> Iterable[str]:
     current: list[str] = []
     in_record = False

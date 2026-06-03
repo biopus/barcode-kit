@@ -4,7 +4,6 @@ import io
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 from Bio import SeqIO
 from Bio.Seq import Seq
@@ -19,19 +18,14 @@ __all__ = [
     "AccessionVersion",
     "AnnotationMarkerEvidence",
     "ParsedGenBankRecord",
-    "accession_from_record",
     "annotation_marker_evidence",
     "detect_markers",
-    "extract_its",
     "extract_marker",
     "format_fasta_record",
     "parse_accession_version",
     "parse_genbank_file",
-    "parse_genbank_record",
     "parse_genbank_text",
     "read_single_genbank",
-    "source_organism",
-    "source_taxon_id",
 ]
 
 
@@ -113,28 +107,14 @@ def parse_genbank_text(text: str) -> ParsedGenBankRecord:
         record = SeqIO.read(io.StringIO(text), "genbank")
     except Exception as error:
         raise GenBankError(f"failed to parse GenBank record: {error}") from error
-    return parse_genbank_record(record)
+    return _parsed_genbank_record(record)
 
 
 def parse_genbank_file(path: Path) -> ParsedGenBankRecord:
-    return parse_genbank_record(read_single_genbank(path))
+    return _parsed_genbank_record(read_single_genbank(path))
 
 
-def parse_genbank_record(record: SeqRecord) -> ParsedGenBankRecord:
-    accession = accession_from_record(record)
-    organism = str(record.annotations.get("organism") or "").strip()
-    if not organism:
-        organism = source_organism(record) or "unknown"
-    return ParsedGenBankRecord(
-        record=record,
-        accession=accession,
-        organism=organism,
-        taxon_id=source_taxon_id(record),
-        marker_flags=detect_markers(record),
-    )
-
-
-def accession_from_record(record: SeqRecord) -> AccessionVersion:
+def _parsed_genbank_record(record: SeqRecord) -> ParsedGenBankRecord:
     root: str | None = None
     version: int | None = None
     accessions = record.annotations.get("accessions") or []
@@ -148,28 +128,30 @@ def accession_from_record(record: SeqRecord) -> AccessionVersion:
         parsed = parse_accession_version(record_id)
         root = root or parsed.root
         version = version or parsed.version
-    if root and version:
-        return AccessionVersion(root=root, version=int(version))
-    raise GenBankError(f"record missing versioned accession: {record_id}")
+    if not root or not version:
+        raise GenBankError(f"record missing versioned accession: {record_id}")
 
-
-def source_organism(record: SeqRecord) -> str | None:
-    for feature in record.features:
-        if feature.type == "source":
-            values = feature.qualifiers.get("organism")
-            if values:
-                return str(values[0])
-    return None
-
-
-def source_taxon_id(record: SeqRecord) -> int | None:
+    organism = str(record.annotations.get("organism") or "").strip()
+    taxon_id = None
     for feature in record.features:
         if feature.type != "source":
             continue
+        if not organism:
+            values = feature.qualifiers.get("organism")
+            if values:
+                organism = str(values[0])
         for value in feature.qualifiers.get("db_xref", []):
-            if str(value).startswith("taxon:"):
-                return int(str(value).split(":", 1)[1])
-    return None
+            if taxon_id is None and str(value).startswith("taxon:"):
+                taxon_id = int(str(value).split(":", 1)[1])
+    organism = organism or "unknown"
+
+    return ParsedGenBankRecord(
+        record=record,
+        accession=AccessionVersion(root=root, version=int(version)),
+        organism=organism,
+        taxon_id=taxon_id,
+        marker_flags=detect_markers(record),
+    )
 
 
 def detect_markers(record: SeqRecord) -> dict[Marker, bool]:
@@ -182,55 +164,57 @@ def extract_marker(record: SeqRecord, marker: Marker) -> Seq | None:
 
 def annotation_marker_evidence(record: SeqRecord, marker: Marker) -> AnnotationMarkerEvidence:
     if marker is Marker.ITS:
-        return _its_marker_evidence(record)
+        evidence = _its_feature_evidence(record)
+        sequence, pattern = _extract_complete_its(record, evidence)
+        observed: set[str] = set()
+        for item in evidence:
+            observed.update(item.components & ITS_PRIMARY_COMPONENTS)
+        return AnnotationMarkerEvidence(
+            contains_marker=ITS_PRIMARY_COMPONENTS <= observed,
+            extractable_marker=sequence is not None,
+            sequence=sequence,
+            annotation_pattern=pattern or _classify_its_pattern(evidence),
+        )
+
     if marker is Marker.ITS2:
-        return _its2_marker_evidence(record)
-    sequence = _extract_coding_marker(record, marker)
-    return AnnotationMarkerEvidence(
-        contains_marker=sequence is not None,
-        extractable_marker=sequence is not None,
-        sequence=sequence,
-        annotation_pattern="coding_feature" if sequence is not None else None,
-    )
+        evidence = _its_feature_evidence(record)
+        sequence = None
+        for item in evidence:
+            primary_components = item.components & ITS_PRIMARY_COMPONENTS
+            if primary_components == {"its2"} and item.components.isdisjoint(ITS_FLANK_COMPONENTS):
+                sequence = item.feature.extract(record.seq)
+                break
+        if sequence is None:
+            for item in evidence:
+                if "its2" in item.components:
+                    sequence = item.feature.extract(record.seq)
+                    break
+        return AnnotationMarkerEvidence(
+            contains_marker=any("its2" in item.components for item in evidence),
+            extractable_marker=sequence is not None,
+            sequence=sequence,
+            annotation_pattern=_classify_its_pattern(evidence),
+        )
 
-
-def _extract_coding_marker(record: SeqRecord, marker: Marker) -> Seq | None:
     targets = {
         Marker.RBCL: {"rbcl"},
         Marker.MATK: {"matk"},
     }[marker]
     for feature in record.features:
-        if feature.type in {"gene", "CDS", "misc_feature", "rRNA", "misc_RNA"} and _qualifier_contains(
-            feature.qualifiers, targets
-        ):
-            return feature.extract(record.seq)
-    return None
-
-
-def extract_its(record: SeqRecord) -> Seq | None:
-    return annotation_marker_evidence(record, Marker.ITS).sequence
-
-
-def _its_marker_evidence(record: SeqRecord) -> AnnotationMarkerEvidence:
-    evidence = _its_feature_evidence(record)
-    sequence, pattern = _extract_complete_its(record, evidence)
-    return AnnotationMarkerEvidence(
-        contains_marker=_contains_complete_its(evidence),
-        extractable_marker=sequence is not None,
-        sequence=sequence,
-        annotation_pattern=pattern or _classify_its_pattern(evidence),
-    )
-
-
-def _its2_marker_evidence(record: SeqRecord) -> AnnotationMarkerEvidence:
-    evidence = _its_feature_evidence(record)
-    sequence = _extract_isolated_its2(record, evidence)
-    return AnnotationMarkerEvidence(
-        contains_marker=any("its2" in item.components for item in evidence),
-        extractable_marker=sequence is not None,
-        sequence=sequence,
-        annotation_pattern=_classify_its_pattern(evidence),
-    )
+        if feature.type not in {"gene", "CDS", "misc_feature", "rRNA", "misc_RNA"}:
+            continue
+        for values in feature.qualifiers.values():
+            for value in values:
+                text = str(value).lower()
+                if any(target in text for target in targets):
+                    sequence = feature.extract(record.seq)
+                    return AnnotationMarkerEvidence(
+                        contains_marker=True,
+                        extractable_marker=True,
+                        sequence=sequence,
+                        annotation_pattern="coding_feature",
+                    )
+    return AnnotationMarkerEvidence(contains_marker=False, extractable_marker=False)
 
 
 def _its_feature_evidence(record: SeqRecord) -> list[_ItsFeatureEvidence]:
@@ -238,7 +222,25 @@ def _its_feature_evidence(record: SeqRecord) -> list[_ItsFeatureEvidence]:
     for feature in record.features:
         if feature.type not in ITS_FEATURE_TYPES:
             continue
-        components = _its_components(feature.qualifiers)
+        chunks: list[str] = []
+        for key in ITS_QUALIFIER_KEYS:
+            values = feature.qualifiers.get(key, [])
+            if isinstance(values, str):
+                values = [values]
+            chunks.extend(str(value) for value in values)
+        text = " ".join(chunks)
+
+        components: set[str] = set()
+        if ITS1_RE.search(text):
+            components.add("its1")
+        if ITS2_RE.search(text):
+            components.add("its2")
+        if RRNA_5_8S_RE.search(text):
+            components.add("5_8s")
+        if SSU_RE.search(text):
+            components.add("ssu")
+        if LSU_RE.search(text):
+            components.add("lsu")
         if not components:
             continue
         evidence.append(
@@ -253,140 +255,79 @@ def _its_feature_evidence(record: SeqRecord) -> list[_ItsFeatureEvidence]:
     return evidence
 
 
-def _its_components(qualifiers: dict[str, Any]) -> set[str]:
-    text = _its_qualifier_text(qualifiers)
-    components: set[str] = set()
-    if ITS1_RE.search(text):
-        components.add("its1")
-    if ITS2_RE.search(text):
-        components.add("its2")
-    if RRNA_5_8S_RE.search(text):
-        components.add("5_8s")
-    if SSU_RE.search(text):
-        components.add("ssu")
-    if LSU_RE.search(text):
-        components.add("lsu")
-    return components
-
-
-def _its_qualifier_text(qualifiers: dict[str, Any]) -> str:
-    chunks: list[str] = []
-    for key in ITS_QUALIFIER_KEYS:
-        values = qualifiers.get(key, [])
-        if isinstance(values, str):
-            values = [values]
-        chunks.extend(str(value) for value in values)
-    return " ".join(chunks)
-
-
-def _contains_complete_its(evidence: list[_ItsFeatureEvidence]) -> bool:
-    observed: set[str] = set()
-    for item in evidence:
-        observed.update(item.components & ITS_PRIMARY_COMPONENTS)
-    return ITS_PRIMARY_COMPONENTS <= observed
-
-
 def _extract_complete_its(
     record: SeqRecord,
     evidence: list[_ItsFeatureEvidence],
 ) -> tuple[Seq | None, str | None]:
-    single_feature = _complete_single_feature(evidence)
-    if single_feature is not None:
-        return single_feature.extract(record.seq), "complete_single_feature"
+    parts: dict[str, _ItsFeatureEvidence] = {}
+    broad_feature: SeqFeature | None = None
+    for item in evidence:
+        has_primary = ITS_PRIMARY_COMPONENTS <= item.components
+        has_flank = bool(item.components & ITS_FLANK_COMPONENTS)
+        if has_primary and not has_flank:
+            return item.feature.extract(record.seq), "complete_single_feature"
+        if has_primary and has_flank and broad_feature is None:
+            broad_feature = item.feature
+        if has_flank:
+            continue
+        for component in item.components & ITS_PRIMARY_COMPONENTS:
+            parts.setdefault(component, item)
 
-    parts = _complete_separate_features(evidence)
-    if parts is not None:
-        sequence = _extract_complete_its_span(record, parts)
-        if sequence is not None:
+    if set(parts) != set(ITS_PRIMARY_COMPONENTS):
+        if broad_feature is not None:
+            return broad_feature.extract(record.seq), "broad_ssu_its_lsu"
+        return None, None
+
+    strands = {item.strand for item in parts.values()}
+    if len(strands) == 1:
+        strand = next(iter(strands))
+        expected_order = ["its2", "5_8s", "its1"] if strand == -1 else ["its1", "5_8s", "its2"]
+        ordered_parts = [parts[name] for name in expected_order]
+        ordered = True
+        for left, right in zip(ordered_parts, ordered_parts[1:]):
+            same_span = left.start == right.start and left.end == right.end and left.strand == right.strand
+            if not same_span and left.end > right.start:
+                ordered = False
+                break
+        if ordered:
+            start = min(item.start for item in ordered_parts)
+            end = max(item.end for item in ordered_parts)
+            sequence = record.seq[start:end]
+            if strand == -1:
+                sequence = sequence.reverse_complement()
             return sequence, "complete_separate_features"
 
-    broad_feature = _complete_broad_feature(evidence)
     if broad_feature is not None:
         return broad_feature.extract(record.seq), "broad_ssu_its_lsu"
-
     return None, None
-
-
-def _complete_single_feature(evidence: list[_ItsFeatureEvidence]) -> SeqFeature | None:
-    for item in evidence:
-        if ITS_PRIMARY_COMPONENTS <= item.components and item.components.isdisjoint(ITS_FLANK_COMPONENTS):
-            return item.feature
-    return None
-
-
-def _complete_broad_feature(evidence: list[_ItsFeatureEvidence]) -> SeqFeature | None:
-    for item in evidence:
-        if ITS_PRIMARY_COMPONENTS <= item.components and item.components & ITS_FLANK_COMPONENTS:
-            return item.feature
-    return None
-
-
-def _complete_separate_features(
-    evidence: list[_ItsFeatureEvidence],
-) -> dict[str, _ItsFeatureEvidence] | None:
-    parts: dict[str, _ItsFeatureEvidence] = {}
-    for item in evidence:
-        primary_components = item.components & ITS_PRIMARY_COMPONENTS
-        if not primary_components or not item.components.isdisjoint(ITS_FLANK_COMPONENTS):
-            continue
-        for component in primary_components:
-            parts.setdefault(component, item)
-    if set(parts) != set(ITS_PRIMARY_COMPONENTS):
-        return None
-    return parts
-
-
-def _extract_complete_its_span(
-    record: SeqRecord,
-    parts: dict[str, _ItsFeatureEvidence],
-) -> Seq | None:
-    strands = {item.strand for item in parts.values()}
-    if len(strands) != 1:
-        return None
-    strand = next(iter(strands))
-    expected_order = ["its2", "5_8s", "its1"] if strand == -1 else ["its1", "5_8s", "its2"]
-    ordered_parts = [parts[name] for name in expected_order]
-    for left, right in zip(ordered_parts, ordered_parts[1:]):
-        if _same_span(left, right):
-            continue
-        if left.end > right.start:
-            return None
-    start = min(item.start for item in ordered_parts)
-    end = max(item.end for item in ordered_parts)
-    sequence = record.seq[start:end]
-    if strand == -1:
-        sequence = sequence.reverse_complement()
-    return sequence
-
-
-def _same_span(left: _ItsFeatureEvidence, right: _ItsFeatureEvidence) -> bool:
-    return left.start == right.start and left.end == right.end and left.strand == right.strand
-
-
-def _extract_isolated_its2(record: SeqRecord, evidence: list[_ItsFeatureEvidence]) -> Seq | None:
-    for item in evidence:
-        primary_components = item.components & ITS_PRIMARY_COMPONENTS
-        if primary_components == {"its2"} and item.components.isdisjoint(ITS_FLANK_COMPONENTS):
-            return item.feature.extract(record.seq)
-    for item in evidence:
-        if "its2" in item.components:
-            return item.feature.extract(record.seq)
-    return None
 
 
 def _classify_its_pattern(evidence: list[_ItsFeatureEvidence]) -> str | None:
     if not evidence:
         return None
-    if _complete_single_feature(evidence) is not None:
-        return "complete_single_feature"
-    if _complete_separate_features(evidence) is not None:
-        return "complete_separate_features"
-    if _complete_broad_feature(evidence) is not None:
-        return "broad_ssu_its_lsu"
 
     observed: set[str] = set()
+    parts: dict[str, _ItsFeatureEvidence] = {}
+    has_complete_single = False
+    has_complete_broad = False
     for item in evidence:
         observed.update(item.components)
+        has_primary = ITS_PRIMARY_COMPONENTS <= item.components
+        has_flank = bool(item.components & ITS_FLANK_COMPONENTS)
+        if has_primary and not has_flank:
+            has_complete_single = True
+        if has_primary and has_flank:
+            has_complete_broad = True
+        if not has_flank:
+            for component in item.components & ITS_PRIMARY_COMPONENTS:
+                parts.setdefault(component, item)
+
+    if has_complete_single:
+        return "complete_single_feature"
+    if set(parts) == set(ITS_PRIMARY_COMPONENTS):
+        return "complete_separate_features"
+    if has_complete_broad:
+        return "broad_ssu_its_lsu"
 
     if ITS_PRIMARY_COMPONENTS <= observed and observed & ITS_FLANK_COMPONENTS:
         return "broad_ssu_its_lsu"
@@ -399,16 +340,6 @@ def _classify_its_pattern(evidence: list[_ItsFeatureEvidence]) -> str | None:
     if observed == {"its1"}:
         return "its1_only"
     return "partial_its_family"
-
-
-def _qualifier_contains(qualifiers: dict[str, Any], targets: set[str]) -> bool:
-    normalized_targets = {target.lower() for target in targets}
-    for values in qualifiers.values():
-        for value in values:
-            text = str(value).lower()
-            if any(target in text for target in normalized_targets):
-                return True
-    return False
 
 
 def format_fasta_record(identifier: str, sequence: Seq | str, width: int = 80) -> str:

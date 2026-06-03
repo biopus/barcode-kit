@@ -2,13 +2,22 @@ from __future__ import annotations
 
 from Bio.Seq import Seq
 
-from barcode_kit.blast import BlastHit, BlastQuery, BlastSeed, SubprocessBlastRunner, extract_query_span, select_blast_rescue_hit
+from barcode_kit import blast as blast_module
+from barcode_kit.blast import BlastRecord, BlastRunner
 from barcode_kit.config import BlastRescueConfig, BlastRescueMarkerConfig
 from barcode_kit.models import Marker
 
 
-def test_select_blast_rescue_hit_accepts_full_subject_coverage_for_its():
-    hit = BlastHit(
+def test_blast_module_exports_only_runner_contract():
+    assert blast_module.__all__ == [
+        "BlastRecord",
+        "BlastRescueResult",
+        "BlastRunner",
+    ]
+
+
+def test_blast_rescue_accepts_full_subject_coverage_for_its():
+    hit = blast_module.BlastHit(
         query_id="failed",
         subject_id="seed1",
         identity=90.0,
@@ -21,19 +30,19 @@ def test_select_blast_rescue_hit_accepts_full_subject_coverage_for_its():
         bitscore=500.0,
     )
 
-    result = select_blast_rescue_hit([hit], Marker.ITS, {"seed1": 600})
+    result = _rescue_with_hits([hit], Marker.ITS, {"seed1": 600})
 
-    assert result.accepted is True
-    assert result.hit == hit
     assert result.fallback_reason is None
-    assert result.subject_coverage == 0.96
-    assert result.query_start == 101
-    assert result.query_end == 676
-    assert result.strand == "+"
+    assert result.sequence == Seq("A" * 576)
+    assert result.metadata["blast_seed_accession"] == "seed1"
+    assert result.metadata["blast_subject_coverage"] == 0.96
+    assert result.metadata["blast_query_start"] == 101
+    assert result.metadata["blast_query_end"] == 676
+    assert result.metadata["blast_strand"] == "+"
 
 
-def test_select_blast_rescue_hit_rejects_low_subject_coverage():
-    hit = BlastHit(
+def test_blast_rescue_rejects_low_subject_coverage():
+    hit = blast_module.BlastHit(
         query_id="failed",
         subject_id="seed1",
         identity=95.0,
@@ -46,14 +55,14 @@ def test_select_blast_rescue_hit_rejects_low_subject_coverage():
         bitscore=300.0,
     )
 
-    result = select_blast_rescue_hit([hit], Marker.ITS, {"seed1": 600})
+    result = _rescue_with_hits([hit], Marker.ITS, {"seed1": 600})
 
-    assert result.accepted is False
+    assert result.sequence is None
     assert result.fallback_reason == "blast_subject_coverage_low"
 
 
-def test_select_blast_rescue_hit_rejects_low_identity():
-    hit = BlastHit(
+def test_blast_rescue_rejects_low_identity():
+    hit = blast_module.BlastHit(
         query_id="failed",
         subject_id="seed1",
         identity=79.0,
@@ -66,14 +75,14 @@ def test_select_blast_rescue_hit_rejects_low_identity():
         bitscore=300.0,
     )
 
-    result = select_blast_rescue_hit([hit], Marker.ITS, {"seed1": 600})
+    result = _rescue_with_hits([hit], Marker.ITS, {"seed1": 600})
 
-    assert result.accepted is False
+    assert result.sequence is None
     assert result.fallback_reason == "blast_identity_low"
 
 
-def test_select_blast_rescue_hit_rejects_seed_endpoint_miss():
-    hit = BlastHit(
+def test_blast_rescue_rejects_seed_endpoint_miss():
+    hit = blast_module.BlastHit(
         query_id="failed",
         subject_id="seed1",
         identity=95.0,
@@ -86,14 +95,14 @@ def test_select_blast_rescue_hit_rejects_seed_endpoint_miss():
         bitscore=300.0,
     )
 
-    result = select_blast_rescue_hit([hit], Marker.ITS, {"seed1": 600})
+    result = _rescue_with_hits([hit], Marker.ITS, {"seed1": 600})
 
-    assert result.accepted is False
+    assert result.sequence is None
     assert result.fallback_reason == "blast_seed_endpoint_miss"
 
 
-def test_select_blast_rescue_hit_rejects_implausible_query_span_length():
-    hit = BlastHit(
+def test_blast_rescue_rejects_implausible_query_span_length():
+    hit = blast_module.BlastHit(
         query_id="failed",
         subject_id="seed1",
         identity=95.0,
@@ -106,14 +115,14 @@ def test_select_blast_rescue_hit_rejects_implausible_query_span_length():
         bitscore=300.0,
     )
 
-    result = select_blast_rescue_hit([hit], Marker.ITS, {"seed1": 600})
+    result = _rescue_with_hits([hit], Marker.ITS, {"seed1": 600})
 
-    assert result.accepted is False
+    assert result.sequence is None
     assert result.fallback_reason == "blast_query_length_ratio"
 
 
-def test_select_blast_rescue_hit_rejects_ambiguous_distant_high_scoring_hit():
-    best = BlastHit(
+def test_blast_rescue_rejects_ambiguous_distant_high_scoring_hit():
+    best = blast_module.BlastHit(
         query_id="failed",
         subject_id="seed1",
         identity=95.0,
@@ -125,7 +134,7 @@ def test_select_blast_rescue_hit_rejects_ambiguous_distant_high_scoring_hit():
         evalue=1e-80,
         bitscore=500.0,
     )
-    second = BlastHit(
+    second = blast_module.BlastHit(
         query_id="failed",
         subject_id="seed2",
         identity=94.0,
@@ -138,15 +147,15 @@ def test_select_blast_rescue_hit_rejects_ambiguous_distant_high_scoring_hit():
         bitscore=480.0,
     )
 
-    result = select_blast_rescue_hit([best, second], Marker.ITS, {"seed1": 600, "seed2": 600})
+    result = _rescue_with_hits([best, second], Marker.ITS, {"seed1": 600, "seed2": 600})
 
-    assert result.accepted is False
+    assert result.sequence is None
     assert result.fallback_reason == "ambiguous_blast_hit"
 
 
-def test_extract_query_span_reverse_complements_minus_orientation_hit():
+def test_blast_rescue_reverse_complements_minus_orientation_hit():
     sequence = Seq("AAAACCCCGGGGTTTT")
-    hit = BlastHit(
+    hit = blast_module.BlastHit(
         query_id="failed",
         subject_id="seed1",
         identity=99.0,
@@ -159,11 +168,19 @@ def test_extract_query_span_reverse_complements_minus_orientation_hit():
         bitscore=100.0,
     )
 
-    assert extract_query_span(sequence, hit) == Seq("CCCCGGGG").reverse_complement()
+    result = blast_module._rescue_record(
+        BlastRecord(accession_version="failed", sequence=sequence),
+        [hit],
+        Marker.ITS,
+        {"seed1": 8},
+        BlastRescueConfig(),
+    )
+
+    assert result.sequence == Seq("CCCCGGGG").reverse_complement()
 
 
-def test_select_blast_rescue_hit_uses_configured_marker_thresholds():
-    hit = BlastHit(
+def test_blast_rescue_uses_configured_marker_thresholds():
+    hit = blast_module.BlastHit(
         query_id="failed",
         subject_id="seed1",
         identity=90.0,
@@ -184,9 +201,9 @@ def test_select_blast_rescue_hit_uses_configured_marker_thresholds():
         )
     )
 
-    result = select_blast_rescue_hit([hit], Marker.ITS, {"seed1": 600}, config)
+    result = _rescue_with_hits([hit], Marker.ITS, {"seed1": 600}, config)
 
-    assert result.accepted is False
+    assert result.sequence is None
     assert result.fallback_reason == "blast_identity_low"
 
 
@@ -217,9 +234,9 @@ def test_subprocess_blast_runner_uses_hardcoded_commands_and_configured_search_p
         evalue=1e-5,
     )
 
-    result = SubprocessBlastRunner(config).rescue(
-        [BlastQuery(accession_version="failed", sequence="AAAACCCC")],
-        [BlastSeed(accession_version="seed1", sequence="AAAACCCC")],
+    result = BlastRunner(config).rescue(
+        [BlastRecord(accession_version="failed", sequence="AAAACCCC")],
+        [BlastRecord(accession_version="seed1", sequence="AAAACCCC")],
         Marker.ITS,
     )
 
@@ -230,3 +247,18 @@ def test_subprocess_blast_runner_uses_hardcoded_commands_and_configured_search_p
     assert commands[1][commands[1].index("-evalue") + 1] == "1e-05"
     assert commands[1][commands[1].index("-outfmt") + 1].startswith("6 qseqid")
     assert result["failed"].sequence == Seq("AAAACCCC")
+
+
+def _rescue_with_hits(
+    hits: list[blast_module.BlastHit],
+    marker: Marker,
+    seed_lengths: dict[str, int],
+    config: BlastRescueConfig | None = None,
+):
+    return blast_module._rescue_record(
+        BlastRecord(accession_version="failed", sequence="N" * 100 + "A" * 2000),
+        hits,
+        marker,
+        seed_lengths,
+        config or BlastRescueConfig(),
+    )

@@ -8,7 +8,6 @@ from enum import StrEnum
 __all__ = [
     "BuildReportEntry",
     "GenBankCacheRecord",
-    "ItsExtractionMode",
     "Marker",
     "SequenceQuality",
     "TaxonConstraint",
@@ -44,12 +43,6 @@ class Marker(StrEnum):
     @property
     def is_coding(self) -> bool:
         return self in {Marker.MATK, Marker.RBCL}
-
-
-class ItsExtractionMode(StrEnum):
-    ITSXRUST = "itsxrust"
-    HMM_BLAST = "hmm-blast"
-    ANNOTATION = "annotation"
 
 
 @dataclass(frozen=True)

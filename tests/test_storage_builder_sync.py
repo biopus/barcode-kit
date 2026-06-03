@@ -18,17 +18,15 @@ from barcode_kit.config import (
     TreeShrinkConfig,
 )
 from barcode_kit.genbank import DownloadItem, DownloadReport, SyncService
-from barcode_kit.blast import BlastRescueResult, BlastSeed
+from barcode_kit.blast import BlastRecord, BlastRescueResult
 from barcode_kit.itsxrust import ItsxrustExtractionResult
 from barcode_kit.models import (
     GenBankCacheRecord,
-    ItsExtractionMode,
     Marker,
     TaxonConstraint,
     TaxonQuery,
     TaxonomyRecord,
 )
-from barcode_kit.phylogeny import TreeShrinkQcResult
 from barcode_kit.storage import Storage
 
 
@@ -207,15 +205,11 @@ def test_build_dataset_excludes_records_above_max_ambiguous_content(
     assert report[0].quality.ambiguous_content == 0.5
 
 
-def test_build_dataset_can_remove_treeshrink_long_branch_outliers(
+def test_build_dataset_exports_raw_records_without_treeshrink_qc(
     tmp_path: Path,
     genbank_text,
-    monkeypatch,
 ):
-    config = _config(
-        tmp_path,
-        tree_shrink_qc=TreeShrinkConfig(quantile=0.05, bootstrap=1000, max_removed=6),
-    )
+    config = _config(tmp_path)
     storage = Storage(config.database_path)
     service = SyncService(
         config,
@@ -229,40 +223,6 @@ def test_build_dataset_can_remove_treeshrink_long_branch_outliers(
         ),
     )
     service.sync(TaxonQuery("genus", "Iris"), Marker.RBCL)
-    removed_taxa = {"PP476490.1|Iris_japonica"}
-    qc_calls = []
-
-    def fake_run_tree_shrink_qc(
-        input_fasta: Path,
-        output_fasta: Path,
-        workdir: Path,
-        *,
-        quantile: float,
-        bootstrap: int,
-        max_removed: int | None,
-    ) -> TreeShrinkQcResult:
-        qc_calls.append((input_fasta, output_fasta, workdir, quantile, bootstrap, max_removed))
-        records = [
-            record
-            for record in SeqIO.parse(str(input_fasta), "fasta")
-            if record.id not in removed_taxa
-        ]
-        with output_fasta.open("w", encoding="utf-8") as handle:
-            SeqIO.write(records, handle, "fasta")
-        tree_shrink_output_dir = workdir / "treeshrink"
-        tree_shrink_output_dir.mkdir(parents=True, exist_ok=True)
-        removed_taxa_path = tree_shrink_output_dir / "output.txt"
-        removed_taxa_path.write_text("\n".join(sorted(removed_taxa)), encoding="utf-8")
-        return TreeShrinkQcResult(
-            removed_taxa=removed_taxa,
-            output_fasta=output_fasta,
-            alignment_path=workdir / "mafft.fasta",
-            tree_path=workdir / "iqtree.tree",
-            tree_shrink_output_dir=tree_shrink_output_dir,
-            removed_taxa_path=removed_taxa_path,
-        )
-
-    monkeypatch.setattr(builder_module, "run_tree_shrink_qc", fake_run_tree_shrink_qc)
 
     report = build_dataset(
         config,
@@ -270,33 +230,19 @@ def test_build_dataset_can_remove_treeshrink_long_branch_outliers(
         TaxonQuery("genus", "Iris"),
         Marker.RBCL,
         tmp_path / "out",
-        enable_tree_shrink_qc=True,
     )
 
     assert len(report) == 2
     assert report[0].included is True
-    assert report[1].included is False
-    assert report[1].reason == "TreeShrink long-branch outlier"
-    assert report[1].metadata["tree_shrink_removed_taxa"] == str(
-        tmp_path / "out" / "treeshrink_qc" / "treeshrink" / "output.txt"
-    )
+    assert report[1].included is True
     fasta_text = (tmp_path / "out" / "rbcl.fasta").read_text(encoding="utf-8")
     assert "PP476489.4|Iris_japonica" in fasta_text
-    assert "PP476490.1|Iris_japonica" not in fasta_text
-    assert qc_calls == [
-        (
-            tmp_path / "out" / "treeshrink_qc" / "input.fasta",
-            tmp_path / "out" / "rbcl.fasta",
-            tmp_path / "out" / "treeshrink_qc",
-            0.05,
-            1000,
-            6,
-        )
-    ]
+    assert "PP476490.1|Iris_japonica" in fasta_text
 
 
-def test_build_its_annotation_mode_excludes_its2_only_record_even_if_cache_flag_is_stale(
+def test_build_its_uses_annotation_when_all_itsxrust_extractions_fail(
     tmp_path: Path,
+    monkeypatch,
 ):
     config = _config(tmp_path)
     storage = Storage(config.database_path)
@@ -315,6 +261,13 @@ def test_build_its_annotation_mode_excludes_its2_only_record_even_if_cache_flag_
             )
         ],
     )
+    itsxrust_runner = FailingItsxrustRunner()
+    monkeypatch.setattr(builder_module, "ItsxrustRunner", lambda config: itsxrust_runner)
+    monkeypatch.setattr(
+        builder_module,
+        "BlastRunner",
+        lambda config: (_ for _ in ()).throw(AssertionError("BLAST should not run")),
+    )
 
     report = build_dataset(
         config,
@@ -322,19 +275,20 @@ def test_build_its_annotation_mode_excludes_its2_only_record_even_if_cache_flag_
         TaxonQuery("genus", "Iris"),
         Marker.ITS,
         tmp_path / "out",
-        its_extraction_mode=ItsExtractionMode.ANNOTATION,
     )
 
+    assert itsxrust_runner.extract_many_calls == 1
     assert len(report) == 1
     assert report[0].included is False
     assert report[0].reason == "marker not extracted"
-    assert report[0].metadata["extraction_mode"] == "annotation"
     assert report[0].metadata["extraction_backend"] == "annotation"
+    assert report[0].metadata["hmm_fallback_reason"] == "hmm_failed"
+    assert report[0].metadata["fallback_reason"] is None
     assert report[0].metadata["annotation_contains_marker"] is False
     assert report[0].metadata["annotation_extractable_marker"] is False
 
 
-def test_build_its_hmm_blast_mode_rescues_failed_itsxrust_record_with_seed(
+def test_build_its_rescues_failed_itsxrust_record_with_seed(
     tmp_path: Path,
     monkeypatch,
 ):
@@ -385,8 +339,8 @@ def test_build_its_hmm_blast_mode_rescues_failed_itsxrust_record_with_seed(
         }
     )
     itsxrust_runner = BatchSeedThenFailItsxrustRunner()
-    monkeypatch.setattr(builder_module, "SubprocessItsxrustRunner", lambda config: itsxrust_runner)
-    monkeypatch.setattr(builder_module, "SubprocessBlastRunner", lambda config: blast_runner)
+    monkeypatch.setattr(builder_module, "ItsxrustRunner", lambda config: itsxrust_runner)
+    monkeypatch.setattr(builder_module, "BlastRunner", lambda config: blast_runner)
 
     report = build_dataset(
         config,
@@ -394,7 +348,6 @@ def test_build_its_hmm_blast_mode_rescues_failed_itsxrust_record_with_seed(
         TaxonQuery("genus", "Iris"),
         Marker.ITS,
         tmp_path / "out",
-        its_extraction_mode=ItsExtractionMode.HMM_BLAST,
     )
 
     assert itsxrust_runner.extract_many_calls == 1
@@ -409,20 +362,22 @@ def test_build_its_hmm_blast_mode_rescues_failed_itsxrust_record_with_seed(
     assert "ITS000002.1|Iris_japonica" in (tmp_path / "out" / "its.fasta").read_text()
 
 
-def test_build_its_hmm_blast_mode_excludes_failures_when_no_seed_exists(
+def test_build_its_marks_unrescued_partial_itsxrust_failures_low_quality(
     tmp_path: Path,
     monkeypatch,
 ):
     config = _config(tmp_path)
     storage = Storage(config.database_path)
     storage.initialize()
+    _insert_cached_record(storage, "ITS000001.1", has_its=True, has_its2=True)
     _insert_cached_record(storage, "ITS000003.1", has_its=True, has_its2=True)
+    _write_genbank(config.genbank_cache_dir / "ITS000001.1.gb", "ITS000001", 1, "AAAACCCCGGGG", [])
     _write_genbank(config.genbank_cache_dir / "ITS000003.1.gb", "ITS000003", 1, "TTTTAAAACCCCGGGG", [])
 
-    itsxrust_runner = FailingItsxrustRunner()
+    itsxrust_runner = BatchSeedThenFailItsxrustRunner()
     blast_runner = FakeBlastRunner({})
-    monkeypatch.setattr(builder_module, "SubprocessItsxrustRunner", lambda config: itsxrust_runner)
-    monkeypatch.setattr(builder_module, "SubprocessBlastRunner", lambda config: blast_runner)
+    monkeypatch.setattr(builder_module, "ItsxrustRunner", lambda config: itsxrust_runner)
+    monkeypatch.setattr(builder_module, "BlastRunner", lambda config: blast_runner)
 
     report = build_dataset(
         config,
@@ -430,19 +385,18 @@ def test_build_its_hmm_blast_mode_excludes_failures_when_no_seed_exists(
         TaxonQuery("genus", "Iris"),
         Marker.ITS,
         tmp_path / "out",
-        its_extraction_mode=ItsExtractionMode.HMM_BLAST,
     )
 
     assert itsxrust_runner.extract_many_calls == 1
-    assert len(report) == 1
-    assert report[0].included is False
-    assert report[0].reason == "marker not extracted"
-    assert report[0].metadata["extraction_mode"] == "hmm-blast"
-    assert report[0].metadata["extraction_backend"] == "blastn"
-    assert report[0].metadata["fallback_reason"] == "no_blast_seed"
+    assert len(report) == 2
+    assert report[0].included is True
+    assert report[1].included is False
+    assert report[1].reason == "low quality sequence"
+    assert report[1].metadata["extraction_backend"] == "blastn"
+    assert report[1].metadata["fallback_reason"] == "no_blast_hit"
 
 
-def test_build_its_strict_hmm_mode_excludes_when_hmm_backend_fails(
+def test_build_its_all_itsxrust_failures_use_annotation_without_blast(
     tmp_path: Path,
     monkeypatch,
 ):
@@ -477,7 +431,12 @@ def test_build_its_strict_hmm_mode_excludes_when_hmm_backend_fails(
         [],
     )
     itsxrust_runner = FailingItsxrustRunner()
-    monkeypatch.setattr(builder_module, "SubprocessItsxrustRunner", lambda config: itsxrust_runner)
+    monkeypatch.setattr(builder_module, "ItsxrustRunner", lambda config: itsxrust_runner)
+    monkeypatch.setattr(
+        builder_module,
+        "BlastRunner",
+        lambda config: (_ for _ in ()).throw(AssertionError("BLAST should not run")),
+    )
 
     report = build_dataset(
         config,
@@ -485,16 +444,16 @@ def test_build_its_strict_hmm_mode_excludes_when_hmm_backend_fails(
         TaxonQuery("genus", "Iris"),
         Marker.ITS,
         tmp_path / "out",
-        its_extraction_mode=ItsExtractionMode.ITSXRUST,
     )
 
     assert itsxrust_runner.extract_many_calls == 1
     assert len(report) == 2
-    assert report[0].included is False
-    assert report[0].reason == "marker not extracted"
-    assert report[0].metadata["extraction_mode"] == "itsxrust"
-    assert report[0].metadata["extraction_backend"] == "itsxrust"
-    assert report[0].metadata["fallback_reason"] == "hmm_failed"
+    assert report[0].included is True
+    assert report[0].metadata["extraction_backend"] == "annotation"
+    assert report[0].metadata["hmm_fallback_reason"] == "hmm_failed"
+    assert report[1].included is False
+    assert report[1].reason == "marker not extracted"
+    assert report[1].metadata["extraction_backend"] == "annotation"
 
 
 def test_build_uses_configured_blast_rescue_defaults_for_default_runner(
@@ -522,13 +481,15 @@ def test_build_uses_configured_blast_rescue_defaults_for_default_runner(
     )
     storage = Storage(config.database_path)
     storage.initialize()
+    _insert_cached_record(storage, "ITS000001.1", has_its=True, has_its2=True)
     _insert_cached_record(storage, "ITS000005.1", has_its=True, has_its2=True)
+    _write_genbank(config.genbank_cache_dir / "ITS000001.1.gb", "ITS000001", 1, "AAAACCCCGGGG", [])
     _write_genbank(config.genbank_cache_dir / "ITS000005.1.gb", "ITS000005", 1, "AAAACCCCGGGG", [])
-    monkeypatch.setattr(builder_module, "SubprocessBlastRunner", CapturingBlastRunner)
+    monkeypatch.setattr(builder_module, "BlastRunner", CapturingBlastRunner)
     monkeypatch.setattr(
         builder_module,
-        "SubprocessItsxrustRunner",
-        lambda config: FailingItsxrustRunner(),
+        "ItsxrustRunner",
+        lambda config: BatchSeedThenFailItsxrustRunner(),
     )
 
     build_dataset(
@@ -537,7 +498,6 @@ def test_build_uses_configured_blast_rescue_defaults_for_default_runner(
         TaxonQuery("genus", "Iris"),
         Marker.ITS,
         tmp_path / "out",
-        its_extraction_mode=ItsExtractionMode.HMM_BLAST,
     )
 
     assert captured_configs == [config.blast_rescue]
@@ -570,7 +530,7 @@ def test_build_uses_configured_itsxrust_defaults_for_default_runner(
     storage.initialize()
     _insert_cached_record(storage, "ITS000006.1", has_its=True, has_its2=True)
     _write_genbank(config.genbank_cache_dir / "ITS000006.1.gb", "ITS000006", 1, "AAAACCCCGGGG", [])
-    monkeypatch.setattr(builder_module, "SubprocessItsxrustRunner", CapturingItsxrustRunner)
+    monkeypatch.setattr(builder_module, "ItsxrustRunner", CapturingItsxrustRunner)
 
     build_dataset(
         config,
@@ -578,7 +538,6 @@ def test_build_uses_configured_itsxrust_defaults_for_default_runner(
         TaxonQuery("genus", "Iris"),
         Marker.ITS,
         tmp_path / "out",
-        its_extraction_mode=ItsExtractionMode.ITSXRUST,
     )
 
     assert captured_configs == [config.itsxrust]
@@ -639,7 +598,7 @@ class FakeBlastRunner:
     def rescue(
         self,
         failed_records,
-        seeds: list[BlastSeed],
+        seeds: list[BlastRecord],
         marker: Marker,
     ) -> dict[str, BlastRescueResult]:
         self.seed_accessions = [seed.accession_version for seed in seeds]

@@ -7,7 +7,7 @@ from Bio.Seq import Seq
 from Bio.SeqRecord import SeqRecord
 
 from barcode_kit.config import ItsxrustConfig
-from barcode_kit.itsxrust import ItsxrustInput, SubprocessItsxrustRunner
+from barcode_kit.itsxrust import ItsxrustInput, ItsxrustRunner
 from barcode_kit.models import Marker
 
 
@@ -31,7 +31,7 @@ def test_subprocess_itsxrust_runner_extract_many_uses_one_process_and_maps_missi
     monkeypatch.setattr("barcode_kit.itsxrust.shutil.which", fake_which)
     monkeypatch.setattr("barcode_kit.itsxrust.subprocess.run", fake_run)
 
-    runner = SubprocessItsxrustRunner()
+    runner = ItsxrustRunner()
     results = runner.extract_many(
         [
             ItsxrustInput("ITS000001.1", SeqRecord(Seq("AAAACCCCGGGG"))),
@@ -73,7 +73,7 @@ def test_subprocess_itsxrust_runner_uses_configured_anchor_params(
     monkeypatch.setattr("barcode_kit.itsxrust.shutil.which", fake_which)
     monkeypatch.setattr("barcode_kit.itsxrust.subprocess.run", fake_run)
 
-    runner = SubprocessItsxrustRunner(
+    runner = ItsxrustRunner(
         config=ItsxrustConfig(
             inc_e=0.02,
             min_anchor_score=10,

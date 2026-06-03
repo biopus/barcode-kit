@@ -22,6 +22,7 @@ def test_build_creates_missing_config_file_before_running(tmp_path: Path, monkey
         assert config.collectors.batch_size == 500
         assert query == TaxonQuery("genus", "Iris")
         assert marker is Marker.ITS
+        assert "its_extraction_mode" not in kwargs
         return []
 
     config_path = tmp_path / "config.toml"
@@ -39,6 +40,29 @@ def test_build_creates_missing_config_file_before_running(tmp_path: Path, monkey
     assert result.exit_code == 0, result.output
     assert config_path.exists()
     assert "[build.blast_rescue]" in config_path.read_text(encoding="utf-8")
+
+
+def test_build_rejects_removed_its_extraction_mode_option(tmp_path: Path, monkeypatch):
+    config_path = tmp_path / "config.toml"
+    data_dir = tmp_path / "data"
+    monkeypatch.setenv("BARCODE_KIT_CONFIG", str(config_path))
+    monkeypatch.setattr(cli.config_module, "DEFAULT_DATA_DIR", data_dir)
+
+    result = CliRunner().invoke(
+        cli.app,
+        [
+            "build",
+            "--genus",
+            "Iris",
+            "--marker",
+            "its",
+            "--its-extraction-mode",
+            "annotation",
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "No such option" in result.output
 
 
 def test_build_accepts_lineage_constraints_for_taxon_query(tmp_path: Path, monkeypatch):
@@ -84,6 +108,8 @@ def test_build_accepts_lineage_constraints_for_taxon_query(tmp_path: Path, monke
 
 
 def test_build_enables_treeshrink_qc_using_config_options(tmp_path: Path, monkeypatch):
+    qc_calls = []
+
     def fake_build_dataset(
         config: AppConfig,
         storage: Any,
@@ -93,13 +119,21 @@ def test_build_enables_treeshrink_qc_using_config_options(tmp_path: Path, monkey
         **kwargs: Any,
     ) -> list[BuildReportEntry]:
         assert "tree_shrink_qc" not in kwargs
-        assert kwargs["enable_tree_shrink_qc"] is True
         assert config.tree_shrink_qc == TreeShrinkConfig(
             quantile=0.01,
             bootstrap=1000,
             max_removed=6,
         )
         return []
+
+    def fake_tree_shrink_qc(
+        outdir: Path,
+        marker: Marker,
+        report: list[BuildReportEntry],
+        tree_shrink_config: TreeShrinkConfig,
+    ) -> list[BuildReportEntry]:
+        qc_calls.append((outdir, marker, report, tree_shrink_config))
+        return report
 
     config_path = tmp_path / "config.toml"
     data_dir = tmp_path / "data"
@@ -118,6 +152,7 @@ max_removed = 6
     monkeypatch.setenv("BARCODE_KIT_CONFIG", str(config_path))
     monkeypatch.setattr(cli, "Storage", lambda path: object())
     monkeypatch.setattr(cli, "build_dataset", fake_build_dataset)
+    monkeypatch.setattr(cli, "tree_shrink_qc", fake_tree_shrink_qc)
 
     result = CliRunner().invoke(
         cli.app,
@@ -134,6 +169,14 @@ max_removed = 6
     )
 
     assert result.exit_code == 0, result.output
+    assert qc_calls == [
+        (
+            tmp_path / "out",
+            Marker.RBCL,
+            [],
+            TreeShrinkConfig(quantile=0.01, bootstrap=1000, max_removed=6),
+        )
+    ]
 
 
 def test_build_rejects_treeshrink_qc_quantile_cli_option(tmp_path: Path, monkeypatch):

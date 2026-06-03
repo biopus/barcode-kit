@@ -19,7 +19,7 @@ from barcode_kit.parser import format_fasta_record
 __all__ = [
     "ItsxrustExtractionResult",
     "ItsxrustInput",
-    "SubprocessItsxrustRunner",
+    "ItsxrustRunner",
     "default_hmm_path",
 ]
 
@@ -36,7 +36,7 @@ class ItsxrustInput:
     record: SeqRecord
 
 
-class SubprocessItsxrustRunner:
+class ItsxrustRunner:
     def __init__(self, batch_size: int = 1000, config: ItsxrustConfig | None = None):
         self.batch_size = batch_size
         self.config = config or ItsxrustConfig()

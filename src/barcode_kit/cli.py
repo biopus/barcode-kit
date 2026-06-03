@@ -16,9 +16,10 @@ from barcode_kit import config as config_module
 from barcode_kit.builder import build_dataset
 from barcode_kit.exceptions import BarcodeKitError
 from barcode_kit.genbank import SyncService
-from barcode_kit.models import ItsExtractionMode, Marker, TaxonConstraint, TaxonQuery
+from barcode_kit.models import Marker, TaxonConstraint, TaxonQuery
 from barcode_kit.storage import Storage
 from barcode_kit.taxonomy import ETETaxonomyResolver
+from barcode_kit.validation import tree_shrink_qc
 
 
 __all__ = [
@@ -107,11 +108,7 @@ def build(
     ] = None,
     exclude_hybrid: Annotated[bool, typer.Option("--exclude-hybrid")] = False,
     exclude_uncertain: Annotated[bool, typer.Option("--exclude-uncertain")] = False,
-    its_extraction_mode: Annotated[
-        ItsExtractionMode,
-        typer.Option("--its-extraction-mode", case_sensitive=False),
-    ] = ItsExtractionMode.HMM_BLAST,
-    tree_shrink_qc: Annotated[
+    enable_tree_shrink_qc: Annotated[
         bool,
         typer.Option("--tree-shrink-qc", help="Run MAFFT, IQ-TREE, and TreeShrink long-branch QC."),
     ] = False,
@@ -132,8 +129,7 @@ def build(
             max_ambiguous_content,
             exclude_hybrid,
             exclude_uncertain,
-            its_extraction_mode,
-            tree_shrink_qc,
+            enable_tree_shrink_qc,
         )
     )
 
@@ -337,8 +333,7 @@ def _build(
     max_ambiguous_content: float | None,
     exclude_hybrid: bool,
     exclude_uncertain: bool,
-    its_extraction_mode: ItsExtractionMode,
-    tree_shrink_qc: bool,
+    enable_tree_shrink_qc: bool,
 ) -> None:
     query = _constrained_taxon_query(
         kingdom,
@@ -361,9 +356,9 @@ def _build(
         max_ambiguous_content=max_ambiguous_content,
         exclude_hybrid=exclude_hybrid,
         exclude_uncertain=exclude_uncertain,
-        its_extraction_mode=its_extraction_mode,
-        enable_tree_shrink_qc=tree_shrink_qc,
     )
+    if enable_tree_shrink_qc:
+        report = tree_shrink_qc(outdir, marker, report, config.tree_shrink_qc)
     included = sum(1 for entry in report if entry.included)
     _echo_json(
         {

@@ -71,6 +71,12 @@ def build_client_with_fake_sessions(
     )
 
 
+def test_genbank_module_does_not_export_callback_aliases():
+    assert "DownloadStatus" in genbank_module.__all__
+    assert "DownloadProgressCallback" not in genbank_module.__all__
+    assert "DownloadedRecordCallback" not in genbank_module.__all__
+
+
 def test_search_does_not_retry_non_rate_limited_client_errors(monkeypatch):
     session = FakeSearchSession([FakeSearchResponse("bad request", status_code=400)])
     monkeypatch.setattr(genbank_module, "_build_ncbi_session", lambda: session)

@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from Bio.Seq import Seq
 from Bio.SeqFeature import FeatureLocation, SeqFeature
 from Bio.SeqRecord import SeqRecord
 
-from barcode_kit.models import Marker
+import barcode_kit.validation as validation_module
+from barcode_kit.config import TreeShrinkConfig
+from barcode_kit.models import BuildReportEntry, Marker, SequenceQuality
+from barcode_kit import parser as parser_module
 from barcode_kit.parser import (
     annotation_marker_evidence,
     detect_markers,
@@ -12,7 +17,24 @@ from barcode_kit.parser import (
     parse_accession_version,
     parse_genbank_text,
 )
-from barcode_kit.validation import sequence_quality
+from barcode_kit.phylogeny import TreeShrinkResult
+from barcode_kit.validation import sequence_quality, tree_shrink_qc
+
+
+def test_parser_exports_only_external_contract():
+    assert parser_module.__all__ == [
+        "AccessionVersion",
+        "AnnotationMarkerEvidence",
+        "ParsedGenBankRecord",
+        "annotation_marker_evidence",
+        "detect_markers",
+        "extract_marker",
+        "format_fasta_record",
+        "parse_accession_version",
+        "parse_genbank_file",
+        "parse_genbank_text",
+        "read_single_genbank",
+    ]
 
 
 def test_parse_accession_version():
@@ -43,6 +65,96 @@ def test_sequence_quality_counts_non_canonical_bases_as_ambiguous():
     assert quality.ambiguous_content == 0.5
     assert not hasattr(quality, "has_stop_codon")
     assert not hasattr(quality, "has_frameshift")
+
+
+def test_tree_shrink_qc_validation_filters_fasta_and_updates_report(
+    tmp_path: Path,
+    monkeypatch,
+):
+    outdir = tmp_path / "out"
+    outdir.mkdir()
+    (outdir / "rbcl.fasta").write_text(
+        ">KEEP.1|Iris_a\nACGT\n>DROP.1|Iris_b\nACGT\n",
+        encoding="utf-8",
+    )
+    report = [
+        _build_report_entry("KEEP.1", "Iris a", True, "KEEP.1|Iris_a"),
+        _build_report_entry("DROP.1", "Iris b", True, "DROP.1|Iris_b"),
+    ]
+    removed_taxa = {"DROP.1|Iris_b"}
+
+    class FakeAlignmentRunner:
+        def align(self, input_path, output_path, *, threads):
+            self.call = (input_path, output_path, threads)
+            output_path.write_text(Path(input_path).read_text(encoding="utf-8"), encoding="utf-8")
+            return output_path
+
+    class FakeTreeRunner:
+        def build_tree(self, input_path, output_path, *, bootstrap):
+            self.call = (input_path, output_path, bootstrap)
+            output_path.write_text("(KEEP:0.1,DROP:1.5);\n", encoding="utf-8")
+            return output_path
+
+    class FakeTreeShrinkRunner:
+        def detect_outliers(
+            self,
+            tree_path,
+            output_dir,
+            *,
+            output_prefix="output",
+            quantile=0.05,
+            max_removed=None,
+        ):
+            self.call = (tree_path, output_dir, output_prefix, quantile, max_removed)
+            output_dir.mkdir(parents=True, exist_ok=True)
+            removed_path = output_dir / f"{output_prefix}.txt"
+            removed_path.write_text("\n".join(sorted(removed_taxa)), encoding="utf-8")
+            return TreeShrinkResult(
+                removed_taxa=removed_taxa,
+                output_dir=output_dir,
+                removed_taxa_path=removed_path,
+            )
+
+    alignment_runner = FakeAlignmentRunner()
+    tree_runner = FakeTreeRunner()
+    tree_shrink_runner = FakeTreeShrinkRunner()
+    monkeypatch.setattr(validation_module, "AlignmentRunner", lambda: alignment_runner)
+    monkeypatch.setattr(validation_module, "TreeRunner", lambda: tree_runner)
+    monkeypatch.setattr(validation_module, "TreeShrinkRunner", lambda: tree_shrink_runner)
+
+    updated_report = tree_shrink_qc(
+        outdir,
+        Marker.RBCL,
+        report,
+        TreeShrinkConfig(quantile=0.05, bootstrap=1000, max_removed=6),
+    )
+
+    assert updated_report[0].included is True
+    assert updated_report[1].included is False
+    assert updated_report[1].reason == "TreeShrink long-branch outlier"
+    assert updated_report[1].metadata["tree_shrink_removed_taxa"] == str(
+        outdir / "treeshrink_qc" / "treeshrink" / "output.txt"
+    )
+    fasta_text = (outdir / "rbcl.fasta").read_text(encoding="utf-8")
+    assert "KEEP.1|Iris_a" in fasta_text
+    assert "DROP.1|Iris_b" not in fasta_text
+    assert alignment_runner.call == (
+        outdir / "treeshrink_qc" / "input.fasta",
+        outdir / "treeshrink_qc" / "mafft.fasta",
+        1,
+    )
+    assert tree_runner.call == (
+        outdir / "treeshrink_qc" / "mafft.fasta",
+        outdir / "treeshrink_qc" / "iqtree.tree",
+        1000,
+    )
+    assert tree_shrink_runner.call == (
+        outdir / "treeshrink_qc" / "iqtree.tree",
+        outdir / "treeshrink_qc" / "treeshrink",
+        "output",
+        0.05,
+        6,
+    )
 
 
 def test_complete_its_single_feature_sets_flags_and_extracts_full_its():
@@ -293,3 +405,20 @@ def _record_with_features(sequence: str, features: list[SeqFeature]) -> SeqRecor
         *features,
     ]
     return record
+
+
+def _build_report_entry(
+    accession_version: str,
+    scientific_name: str,
+    included: bool,
+    output_id: str | None,
+) -> BuildReportEntry:
+    return BuildReportEntry(
+        accession_version=accession_version,
+        scientific_name=scientific_name,
+        included=included,
+        reason=None,
+        quality=SequenceQuality(length=4, gc_content=0.5, ambiguous_content=0.0),
+        output_id=output_id,
+        metadata={"marker": Marker.RBCL.value},
+    )

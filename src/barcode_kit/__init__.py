@@ -10,30 +10,24 @@ from barcode_kit.models import (
     TaxonomyRecord,
 )
 from barcode_kit.phylogeny import (
-    AlignmentProgram,
-    SubprocessAlignmentRunner,
-    SubprocessTreeRunner,
-    SubprocessTreeShrinkRunner,
-    SubprocessTrimalRunner,
-    TreeShrinkQcResult,
+    AlignmentRunner,
+    TreeRunner,
+    TreeShrinkRunner,
     TreeShrinkResult,
-    run_tree_shrink_qc,
+    TrimalRunner,
 )
 
 __all__ = [
-    "AlignmentProgram",
+    "AlignmentRunner",
     "BuildReportEntry",
     "GenBankCacheRecord",
     "Marker",
     "SequenceQuality",
-    "SubprocessAlignmentRunner",
-    "SubprocessTreeRunner",
-    "SubprocessTreeShrinkRunner",
-    "SubprocessTrimalRunner",
     "TaxonQuery",
     "TaxonomyRecord",
+    "TreeRunner",
+    "TreeShrinkRunner",
     "TreeShrinkConfig",
-    "TreeShrinkQcResult",
     "TreeShrinkResult",
-    "run_tree_shrink_qc",
+    "TrimalRunner",
 ]
