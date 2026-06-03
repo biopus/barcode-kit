@@ -196,6 +196,7 @@ class Storage:
         query: TaxonQuery | None = None,
         *,
         accession: str | None = None,
+        marker: Marker | None = None,
     ) -> list[GenBankCacheRecord]:
         joins = ""
         where: list[str] = []
@@ -208,6 +209,8 @@ class Storage:
         if accession is not None:
             where.append("(c.accession_root = ? OR c.accession_version = ?)")
             params.extend([accession, accession])
+        if marker is not None:
+            where.append(f"c.{marker.cache_column} = 1")
 
         where_sql = f"WHERE {' AND '.join(where)}" if where else ""
         sql = f"""

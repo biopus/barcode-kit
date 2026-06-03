@@ -14,9 +14,10 @@ import typer
 
 from barcode_kit import config as config_module
 from barcode_kit.builder import build_dataset
-from barcode_kit.exceptions import BarcodeKitError
+from barcode_kit.exceptions import BarcodeKitError, GenBankError, TaxonomyError
 from barcode_kit.genbank import SyncService
-from barcode_kit.models import Marker, TaxonConstraint, TaxonExclusion, TaxonQuery
+from barcode_kit.models import GenBankCacheRecord, Marker, TaxonConstraint, TaxonExclusion, TaxonQuery
+from barcode_kit.parser import parse_genbank_file
 from barcode_kit.storage import Storage
 from barcode_kit.taxonomy import ETETaxonomyResolver
 from barcode_kit.validation import tree_shrink_qc
@@ -31,6 +32,7 @@ __all__ = [
     "db_clear",
     "db_info",
     "db_prune",
+    "db_rebuild",
     "db_remove",
     "db_status",
     "main",
@@ -159,19 +161,52 @@ def db_remove(
         str | None,
         typer.Option("--accession", help="Accession root or version to remove."),
     ] = None,
+    marker: Annotated[
+        Marker | None,
+        typer.Option("--marker", case_sensitive=False, help="Marker records to remove."),
+    ] = None,
+    kingdom: KingdomOption = None,
+    phylum: PhylumOption = None,
+    class_name: ClassOption = None,
+    order: OrderOption = None,
     family: FamilyOption = None,
     genus: GenusOption = None,
     species: SpeciesOption = None,
     yes: YesOption = False,
 ) -> None:
     """Remove matching records from the local cache."""
-    _run_user_command(lambda: _db_remove(accession, family, genus, species, yes))
+    _run_user_command(
+        lambda: _db_remove(
+            accession,
+            marker,
+            kingdom,
+            phylum,
+            class_name,
+            order,
+            family,
+            genus,
+            species,
+            yes,
+        )
+    )
 
 
 @db_app.command("clear")
-def db_clear(yes: YesOption = False) -> None:
+def db_clear(
+    yes: YesOption = False,
+    metadata_only: Annotated[
+        bool,
+        typer.Option("--metadata-only", help="Keep GenBank cache files and remove only metadata."),
+    ] = False,
+) -> None:
     """Remove all local cache records and GenBank cache files."""
-    _run_user_command(lambda: _db_clear(yes))
+    _run_user_command(lambda: _db_clear(yes, metadata_only))
+
+
+@db_app.command("rebuild")
+def db_rebuild(yes: YesOption = False) -> None:
+    """Rebuild local metadata from GenBank cache files."""
+    _run_user_command(lambda: _db_rebuild(yes))
 
 
 @db_app.command("prune")
@@ -411,22 +446,37 @@ def _db_info(
 
 def _db_remove(
     accession: str | None,
+    marker: Marker | None,
+    kingdom: str | None,
+    phylum: str | None,
+    class_name: str | None,
+    order: str | None,
     family: str | None,
     genus: str | None,
     species: str | None,
     yes: bool,
 ) -> None:
-    taxon_selected = any([family, genus, species])
-    if bool(accession) == taxon_selected:
-        raise BarcodeKitError(
-            "provide exactly one of --accession, --family, --genus, or --species"
-        )
+    taxon_selected = any([kingdom, phylum, class_name, order, family, genus, species])
+    if not any([accession, marker, taxon_selected]):
+        raise BarcodeKitError("provide --accession, --marker, or a taxon filter")
 
     config = config_module.load_config()
     storage = Storage(config.database_path)
     storage.initialize()
-    query = _taxon_query(family, genus, species) if taxon_selected else None
-    records = storage.cache_records(query, accession=accession)
+    query = (
+        _constrained_taxon_query(
+            kingdom,
+            phylum,
+            class_name,
+            order,
+            family,
+            genus,
+            species,
+        )
+        if taxon_selected
+        else None
+    )
+    records = storage.cache_records(query, accession=accession, marker=marker)
     _confirm_cache_mutation(f"Remove {len(records)} local cache record(s)", yes)
 
     files_removed = _remove_genbank_cache_files(
@@ -436,7 +486,11 @@ def _db_remove(
     database_removed = storage.delete_cache_records(record.accession_root for record in records)
     taxonomy_removed = storage.delete_orphan_taxonomy()
     payload = {
-        "selector": {"accession": accession, "query": _query_payload(query)},
+        "selector": {
+            "accession": accession,
+            "marker": marker.value if marker is not None else None,
+            "query": _query_payload(query),
+        },
         "database_records_removed": database_removed,
         "files_removed": files_removed,
         "taxonomy_removed": taxonomy_removed,
@@ -444,7 +498,7 @@ def _db_remove(
     _echo_json(payload)
 
 
-def _db_clear(yes: bool) -> None:
+def _db_clear(yes: bool, metadata_only: bool = False) -> None:
     config = config_module.load_config()
     storage = Storage(config.database_path)
     storage.initialize()
@@ -454,12 +508,12 @@ def _db_clear(yes: bool) -> None:
         if config.genbank_cache_dir.exists()
         else []
     )
-    _confirm_cache_mutation(
-        f"Remove all {len(records)} local cache record(s) and {len(cache_files)} GenBank file(s)",
-        yes,
-    )
+    message = f"Remove all {len(records)} local cache record(s)"
+    if not metadata_only:
+        message += f" and {len(cache_files)} GenBank file(s)"
+    _confirm_cache_mutation(message, yes)
 
-    files_removed = _remove_genbank_cache_files(cache_files)
+    files_removed = 0 if metadata_only else _remove_genbank_cache_files(cache_files)
     deleted = storage.clear_cache()
     payload = {
         "database_records_removed": deleted["genbank_cache"],
@@ -467,6 +521,50 @@ def _db_clear(yes: bool) -> None:
         "taxonomy_removed": deleted["taxonomy"],
     }
     _echo_json(payload)
+
+
+def _db_rebuild(yes: bool) -> None:
+    config = config_module.load_config()
+    storage = Storage(config.database_path)
+    storage.initialize()
+    cache_files = (
+        sorted(config.genbank_cache_dir.glob("*.gb"))
+        if config.genbank_cache_dir.exists()
+        else []
+    )
+    _confirm_cache_mutation(f"Rebuild metadata from {len(cache_files)} GenBank file(s)", yes)
+
+    resolver = ETETaxonomyResolver()
+    rebuilt = 0
+    failed: list[dict[str, str]] = []
+    for path in cache_files:
+        try:
+            parsed = parse_genbank_file(path)
+            taxonomy = resolver.standardize(parsed.organism, parsed.taxon_id)
+            cache_record = GenBankCacheRecord(
+                accession_root=parsed.accession.root,
+                version=parsed.accession.version,
+                accession_version=parsed.accession.value,
+                taxon_id=taxonomy.taxon_id,
+                has_its=parsed.marker_flags[Marker.ITS],
+                has_matk=parsed.marker_flags[Marker.MATK],
+                has_rbcl=parsed.marker_flags[Marker.RBCL],
+                has_its2=parsed.marker_flags[Marker.ITS2],
+            )
+            with storage.connect() as connection:
+                storage.upsert_taxonomy(taxonomy, connection)
+                storage.upsert_genbank_cache(cache_record, connection)
+            rebuilt += 1
+        except (GenBankError, TaxonomyError) as error:
+            failed.append({"file": str(path), "error": str(error)})
+
+    _echo_json(
+        {
+            "files_scanned": len(cache_files),
+            "records_rebuilt": rebuilt,
+            "failed": failed,
+        }
+    )
 
 
 def _db_prune(yes: bool) -> None:

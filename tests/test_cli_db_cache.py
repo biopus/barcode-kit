@@ -129,6 +129,68 @@ def test_db_remove_by_genus_leaves_orphan_genbank_file_for_prune(
     assert _cache_file(config, "AB000001.2").exists()
 
 
+def test_db_remove_filters_by_lineage_and_marker_and_deletes_files(
+    tmp_path,
+    monkeypatch,
+    genbank_text,
+):
+    config = _write_test_config(tmp_path, monkeypatch)
+    storage = Storage(config.database_path)
+    _seed_record(
+        storage,
+        "PX743804",
+        1,
+        12345,
+        "Aspidistra elatior",
+        family="Asparagaceae",
+        genus="Aspidistra",
+        has_rbcl=True,
+        has_matk=True,
+    )
+    _seed_record(
+        storage,
+        "PX743803",
+        1,
+        67890,
+        "Aspidistra typica",
+        family="Asparagaceae",
+        genus="Aspidistra",
+        has_matk=True,
+    )
+    _cache_file(config, "PX743804.1").write_text(
+        genbank_text(accession="PX743804", version=1, organism="Aspidistra elatior"),
+        encoding="utf-8",
+    )
+    _cache_file(config, "PX743803.1").write_text(
+        genbank_text(accession="PX743803", version=1, organism="Aspidistra typica", gene="matK"),
+        encoding="utf-8",
+    )
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "db",
+            "remove",
+            "--family",
+            "Asparagaceae",
+            "--genus",
+            "Aspidistra",
+            "--marker",
+            "rbcl",
+            "--yes",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["database_records_removed"] == 1
+    assert payload["files_removed"] == 1
+    assert payload["taxonomy_removed"] == 1
+    assert not _cache_file(config, "PX743804.1").exists()
+    assert _cache_file(config, "PX743803.1").exists()
+    assert storage.counts() == {"taxonomy": 1, "genbank_cache": 1}
+
+
 def test_db_clear_deletes_all_cache_rows_taxonomy_and_files(tmp_path, monkeypatch):
     config = _write_test_config(tmp_path, monkeypatch)
     storage = Storage(config.database_path)
@@ -146,6 +208,23 @@ def test_db_clear_deletes_all_cache_rows_taxonomy_and_files(tmp_path, monkeypatc
     assert payload["files_removed"] == 2
     assert storage.counts() == {"taxonomy": 0, "genbank_cache": 0}
     assert list(config.genbank_cache_dir.glob("*.gb")) == []
+
+
+def test_db_clear_metadata_only_keeps_genbank_files(tmp_path, monkeypatch):
+    config = _write_test_config(tmp_path, monkeypatch)
+    storage = Storage(config.database_path)
+    _seed_record(storage, "PP476489", 4, 12345, "Iris japonica")
+    _cache_file(config, "PP476489.4").write_text("cached iris", encoding="utf-8")
+
+    result = CliRunner().invoke(app, ["db", "clear", "--metadata-only", "--yes"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["database_records_removed"] == 1
+    assert payload["taxonomy_removed"] == 1
+    assert payload["files_removed"] == 0
+    assert storage.counts() == {"taxonomy": 0, "genbank_cache": 0}
+    assert _cache_file(config, "PP476489.4").exists()
 
 
 def test_db_prune_removes_missing_rows_unreferenced_files_and_orphan_taxonomy(
@@ -198,6 +277,36 @@ def test_db_prune_removes_orphan_files_when_database_is_empty(
     assert list(config.genbank_cache_dir.glob("*.gb")) == []
 
 
+def test_db_rebuild_creates_metadata_from_genbank_cache_files(tmp_path, monkeypatch, genbank_text):
+    config = _write_test_config(tmp_path, monkeypatch)
+    _cache_file(config, "PX743804.1").write_text(
+        genbank_text(accession="PX743804", version=1, organism="Aspidistra elatior"),
+        encoding="utf-8",
+    )
+
+    class FakeResolver:
+        def standardize(self, organism, taxon_id):
+            return TaxonomyRecord(
+                taxon_id=taxon_id,
+                scientific_name=organism,
+                family="Asparagaceae",
+                genus="Aspidistra",
+            )
+
+    monkeypatch.setattr("barcode_kit.cli.ETETaxonomyResolver", FakeResolver)
+
+    result = CliRunner().invoke(app, ["db", "rebuild", "--yes"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["files_scanned"] == 1
+    assert payload["records_rebuilt"] == 1
+    assert payload["failed"] == []
+    storage = Storage(config.database_path)
+    assert storage.counts() == {"taxonomy": 1, "genbank_cache": 1}
+    assert storage.marker_counts()["rbcl"] == 1
+
+
 def _write_test_config(tmp_path: Path, monkeypatch) -> AppConfig:
     config_path = tmp_path / "config.toml"
     config = AppConfig(
@@ -220,6 +329,8 @@ def _seed_record(
     scientific_name: str,
     family: str | None = None,
     genus: str | None = None,
+    has_rbcl: bool = False,
+    has_matk: bool = False,
 ) -> None:
     storage.initialize()
     storage.upsert_taxonomy(
@@ -236,6 +347,8 @@ def _seed_record(
             version=version,
             accession_version=f"{accession_root}.{version}",
             taxon_id=taxon_id,
+            has_rbcl=has_rbcl,
+            has_matk=has_matk,
         )
     )
 
