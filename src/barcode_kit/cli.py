@@ -13,6 +13,7 @@ from typing import Annotated
 import typer
 
 from barcode_kit import config as config_module
+from barcode_kit import validation as validation_module
 from barcode_kit.builder import build_dataset
 from barcode_kit.exceptions import BarcodeKitError, GenBankError, TaxonomyError
 from barcode_kit.genbank import SyncService
@@ -20,7 +21,6 @@ from barcode_kit.models import GenBankCacheRecord, Marker, TaxonConstraint, Taxo
 from barcode_kit.parser import parse_genbank_file
 from barcode_kit.storage import Storage
 from barcode_kit.taxonomy import ETETaxonomyResolver
-from barcode_kit.validation import tree_shrink_qc
 
 
 __all__ = [
@@ -36,6 +36,7 @@ __all__ = [
     "db_remove",
     "db_status",
     "main",
+    "qc",
     "sync",
 ]
 
@@ -64,7 +65,7 @@ RankOption = Annotated[
 ]
 ExcludeOption = Annotated[
     list[TaxonExclusion] | None,
-    typer.Option("--exclude", case_sensitive=False, help="Exclude taxon class from build output."),
+    typer.Option("--exclude", case_sensitive=False, help="Exclude taxon class from QC output."),
 ]
 
 
@@ -107,18 +108,8 @@ def build(
     family: FamilyOption = None,
     genus: GenusOption = None,
     species: SpeciesOption = None,
-    min_length: Annotated[int | None, typer.Option("--min-length")] = None,
-    max_ambiguous_content: Annotated[
-        float | None,
-        typer.Option("--max-ambiguous"),
-    ] = None,
-    exclude: ExcludeOption = None,
-    enable_tree_shrink_qc: Annotated[
-        bool,
-        typer.Option("--tree-shrink-qc", help="Run MAFFT, IQ-TREE, and TreeShrink long-branch QC."),
-    ] = False,
 ) -> None:
-    """Build a FASTA dataset from the local cache."""
+    """Build a raw FASTA dataset from the local cache."""
     _run_user_command(
         lambda: _build(
             marker,
@@ -130,6 +121,28 @@ def build(
             family,
             genus,
             species,
+        )
+    )
+
+
+@app.command()
+def qc(
+    dataset: Annotated[Path, typer.Option("--dataset")],
+    min_length: Annotated[int | None, typer.Option("--min-length")] = None,
+    max_ambiguous_content: Annotated[
+        float | None,
+        typer.Option("--max-ambiguous"),
+    ] = None,
+    exclude: ExcludeOption = None,
+    enable_tree_shrink_qc: Annotated[
+        bool,
+        typer.Option("--tree-shrink-qc", help="Run MAFFT, IQ-TREE, and TreeShrink long-branch QC."),
+    ] = False,
+) -> None:
+    """Run selected QC checks on a barcode-kit dataset."""
+    _run_user_command(
+        lambda: _qc(
+            dataset,
             min_length,
             max_ambiguous_content,
             exclude,
@@ -366,10 +379,6 @@ def _build(
     family: str | None,
     genus: str | None,
     species: str | None,
-    min_length: int | None,
-    max_ambiguous_content: float | None,
-    exclude: list[TaxonExclusion] | None,
-    enable_tree_shrink_qc: bool,
 ) -> None:
     query = _constrained_taxon_query(
         kingdom,
@@ -388,12 +397,7 @@ def _build(
         query,
         marker,
         outdir,
-        min_length=min_length,
-        max_ambiguous_content=max_ambiguous_content,
-        exclude=set(exclude or []),
     )
-    if enable_tree_shrink_qc:
-        report = tree_shrink_qc(outdir, marker, report, config.tree_shrink_qc)
     included = sum(1 for entry in report if entry.included)
     _echo_json(
         {
@@ -402,6 +406,43 @@ def _build(
             "records": len(report),
             "included": included,
             "excluded": len(report) - included,
+        }
+    )
+
+
+def _qc(
+    dataset: Path,
+    min_length: int | None,
+    max_ambiguous_content: float | None,
+    exclude: list[TaxonExclusion] | None,
+    enable_tree_shrink_qc: bool,
+) -> None:
+    selected_exclusions = set(exclude or [])
+    if (
+        not selected_exclusions
+        and min_length is None
+        and max_ambiguous_content is None
+        and not enable_tree_shrink_qc
+    ):
+        raise BarcodeKitError("select at least one QC option")
+
+    config = config_module.load_or_create_config()
+    qc_report = validation_module.run_qc(
+        dataset,
+        exclude=selected_exclusions,
+        min_length=min_length,
+        max_ambiguous_content=max_ambiguous_content,
+        enable_tree_shrink_qc=enable_tree_shrink_qc,
+        tree_shrink_config=config.tree_shrink_qc,
+    )
+    records = qc_report["records"]
+    included = sum(1 for record in records if record["included"])
+    _echo_json(
+        {
+            "dataset": str(dataset),
+            "records": len(records),
+            "included": included,
+            "excluded": len(records) - included,
         }
     )
 

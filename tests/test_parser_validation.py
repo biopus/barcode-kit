@@ -1,14 +1,22 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
+import pytest
 from Bio.Seq import Seq
 from Bio.SeqFeature import FeatureLocation, SeqFeature
 from Bio.SeqRecord import SeqRecord
 
 import barcode_kit.validation as validation_module
 from barcode_kit.config import TreeShrinkConfig
-from barcode_kit.models import BuildReportEntry, Marker, SequenceQuality
+from barcode_kit.exceptions import BarcodeKitError
+from barcode_kit.models import (
+    BuildReportEntry,
+    Marker,
+    SequenceQuality,
+    TaxonExclusion,
+)
 from barcode_kit import parser as parser_module
 from barcode_kit.parser import (
     annotation_marker_evidence,
@@ -65,6 +73,294 @@ def test_sequence_quality_counts_non_canonical_bases_as_ambiguous():
     assert quality.ambiguous_content == 0.5
     assert not hasattr(quality, "has_stop_codon")
     assert not hasattr(quality, "has_frameshift")
+
+
+def test_run_qc_applies_taxonomy_exclusion_and_writes_compact_report(tmp_path: Path):
+    dataset = _write_dataset(
+        tmp_path,
+        fasta=">KEEP.1|Iris_a\nACGT\n>DROP.1|Iris_b\nACGT\n",
+        records=[
+            _compact_build_record("KEEP.1", "KEEP.1|Iris_a", "Iris a"),
+            _compact_build_record(
+                "DROP.1",
+                "DROP.1|Iris_b",
+                "Iris b",
+                is_hybrid=True,
+            ),
+        ],
+    )
+
+    report = validation_module.run_qc(
+        dataset,
+        exclude={TaxonExclusion.HYBRID},
+        min_length=None,
+        max_ambiguous_content=None,
+        enable_tree_shrink_qc=False,
+        tree_shrink_config=TreeShrinkConfig(),
+    )
+
+    assert report == {
+        "checks": {
+            "exclude": ["hybrid"],
+            "min_length": None,
+            "max_ambiguous_content": None,
+            "tree_shrink_qc": False,
+        },
+        "records": [
+            {
+                "sequence_id": "KEEP.1|Iris_a",
+                "included": True,
+                "length": 4,
+                "gc_content": 0.5,
+                "ambiguous_content": 0.0,
+                "reasons": [],
+            },
+            {
+                "sequence_id": "DROP.1|Iris_b",
+                "included": False,
+                "length": 4,
+                "gc_content": 0.5,
+                "ambiguous_content": 0.0,
+                "reasons": ["hybrid_excluded"],
+            },
+        ],
+    }
+    assert json.loads(
+        (dataset / "qc" / "qc_report.json").read_text(encoding="utf-8")
+    ) == report
+    qc_fasta = (dataset / "qc" / "rbcl.fasta").read_text(encoding="utf-8")
+    assert "KEEP.1|Iris_a" in qc_fasta
+    assert "DROP.1|Iris_b" not in qc_fasta
+
+
+def test_run_qc_applies_all_sequence_quality_reasons(tmp_path: Path):
+    dataset = _write_dataset(
+        tmp_path,
+        fasta=">SHORT.1|Iris_a\nACNN\n",
+        records=[
+            _compact_build_record(
+                "SHORT.1",
+                "SHORT.1|Iris_a",
+                "Iris a",
+                is_hybrid=True,
+            )
+        ],
+    )
+
+    report = validation_module.run_qc(
+        dataset,
+        exclude=set(),
+        min_length=5,
+        max_ambiguous_content=0.25,
+        enable_tree_shrink_qc=False,
+        tree_shrink_config=TreeShrinkConfig(),
+    )
+
+    assert report["records"][0]["included"] is False
+    assert report["records"][0]["reasons"] == [
+        "sequence_too_short",
+        "ambiguous_content_too_high",
+    ]
+    assert report["records"][0]["ambiguous_content"] == 0.5
+
+
+def test_run_qc_reruns_from_raw_instead_of_previous_qc_output(tmp_path: Path):
+    dataset = _write_dataset(
+        tmp_path,
+        fasta=">RAW.1|Iris_a\nACGT\n",
+        records=[_compact_build_record("RAW.1", "RAW.1|Iris_a", "Iris a")],
+    )
+    validation_module.run_qc(
+        dataset,
+        exclude=set(),
+        min_length=5,
+        max_ambiguous_content=None,
+        enable_tree_shrink_qc=False,
+        tree_shrink_config=TreeShrinkConfig(),
+    )
+
+    report = validation_module.run_qc(
+        dataset,
+        exclude=set(),
+        min_length=None,
+        max_ambiguous_content=0.5,
+        enable_tree_shrink_qc=False,
+        tree_shrink_config=TreeShrinkConfig(),
+    )
+
+    assert report["records"][0]["included"] is True
+    assert report["records"][0]["reasons"] == []
+    assert "RAW.1|Iris_a" in (dataset / "qc" / "rbcl.fasta").read_text(encoding="utf-8")
+
+
+def test_run_qc_rejects_missing_dataset_manifest(tmp_path: Path):
+    with pytest.raises(BarcodeKitError, match="dataset.json"):
+        validation_module.run_qc(
+            tmp_path,
+            exclude={TaxonExclusion.HYBRID},
+            min_length=None,
+            max_ambiguous_content=None,
+            enable_tree_shrink_qc=False,
+            tree_shrink_config=TreeShrinkConfig(),
+        )
+
+
+def test_run_qc_rejects_unsupported_dataset_format(tmp_path: Path):
+    dataset = _write_dataset(
+        tmp_path,
+        fasta=">KEEP.1|Iris_a\nACGT\n",
+        records=[_compact_build_record("KEEP.1", "KEEP.1|Iris_a", "Iris a")],
+    )
+    manifest = json.loads((dataset / "dataset.json").read_text(encoding="utf-8"))
+    manifest["format_version"] = 2
+    (dataset / "dataset.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(BarcodeKitError, match="format_version"):
+        validation_module.run_qc(
+            dataset,
+            exclude={TaxonExclusion.HYBRID},
+            min_length=None,
+            max_ambiguous_content=None,
+            enable_tree_shrink_qc=False,
+            tree_shrink_config=TreeShrinkConfig(),
+        )
+
+
+def test_run_qc_rejects_missing_referenced_file(tmp_path: Path):
+    dataset = _write_dataset(
+        tmp_path,
+        fasta=">KEEP.1|Iris_a\nACGT\n",
+        records=[_compact_build_record("KEEP.1", "KEEP.1|Iris_a", "Iris a")],
+    )
+    (dataset / "raw" / "rbcl.fasta").unlink()
+
+    with pytest.raises(BarcodeKitError, match="raw FASTA"):
+        validation_module.run_qc(
+            dataset,
+            exclude={TaxonExclusion.HYBRID},
+            min_length=None,
+            max_ambiguous_content=None,
+            enable_tree_shrink_qc=False,
+            tree_shrink_config=TreeShrinkConfig(),
+        )
+
+
+def test_run_qc_rejects_unmatched_fasta_identifier(tmp_path: Path):
+    dataset = _write_dataset(
+        tmp_path,
+        fasta=">UNKNOWN.1|Iris_a\nACGT\n",
+        records=[_compact_build_record("KEEP.1", "KEEP.1|Iris_a", "Iris a")],
+    )
+
+    with pytest.raises(BarcodeKitError, match="UNKNOWN.1\\|Iris_a"):
+        validation_module.run_qc(
+            dataset,
+            exclude={TaxonExclusion.HYBRID},
+            min_length=None,
+            max_ambiguous_content=None,
+            enable_tree_shrink_qc=False,
+            tree_shrink_config=TreeShrinkConfig(),
+        )
+
+
+def test_run_qc_passes_only_prechecked_records_to_tree_shrink(
+    tmp_path: Path,
+    monkeypatch,
+):
+    dataset = _write_dataset(
+        tmp_path,
+        fasta=">KEEP.1|Iris_a\nACGT\n>SHORT.1|Iris_b\nAC\n",
+        records=[
+            _compact_build_record("KEEP.1", "KEEP.1|Iris_a", "Iris a"),
+            _compact_build_record("SHORT.1", "SHORT.1|Iris_b", "Iris b"),
+        ],
+    )
+    aligned_inputs: list[str] = []
+
+    class FakeAlignmentRunner:
+        def align(self, input_path, output_path, *, threads):
+            text = Path(input_path).read_text(encoding="utf-8")
+            aligned_inputs.append(text)
+            Path(output_path).write_text(text, encoding="utf-8")
+            return Path(output_path)
+
+    class FakeTreeRunner:
+        def build_tree(self, input_path, output_path, *, bootstrap):
+            Path(output_path).write_text("(KEEP:1.0);\n", encoding="utf-8")
+            return Path(output_path)
+
+    class FakeTreeShrinkRunner:
+        def detect_outliers(
+            self,
+            tree_path,
+            output_dir,
+            *,
+            output_prefix="output",
+            quantile=0.05,
+            max_removed=None,
+        ):
+            output_dir = Path(output_dir)
+            output_dir.mkdir(parents=True)
+            removed_path = output_dir / f"{output_prefix}.txt"
+            removed_path.write_text("KEEP.1|Iris_a\n", encoding="utf-8")
+            return TreeShrinkResult(
+                removed_taxa={"KEEP.1|Iris_a"},
+                output_dir=output_dir,
+                removed_taxa_path=removed_path,
+            )
+
+    monkeypatch.setattr(validation_module, "AlignmentRunner", FakeAlignmentRunner)
+    monkeypatch.setattr(validation_module, "TreeRunner", FakeTreeRunner)
+    monkeypatch.setattr(validation_module, "TreeShrinkRunner", FakeTreeShrinkRunner)
+
+    report = validation_module.run_qc(
+        dataset,
+        exclude=set(),
+        min_length=4,
+        max_ambiguous_content=None,
+        enable_tree_shrink_qc=True,
+        tree_shrink_config=TreeShrinkConfig(),
+    )
+
+    assert "KEEP.1|Iris_a" in aligned_inputs[0]
+    assert "SHORT.1|Iris_b" not in aligned_inputs[0]
+    assert report["records"][0]["reasons"] == ["tree_shrink_long_branch_outlier"]
+    assert report["records"][1]["reasons"] == ["sequence_too_short"]
+    assert (dataset / "qc" / "rbcl.fasta").read_text(encoding="utf-8") == ""
+    assert (dataset / "qc" / "treeshrink_qc" / "treeshrink" / "output.txt").exists()
+
+
+def test_run_qc_tree_shrink_failure_preserves_previous_qc_output(
+    tmp_path: Path,
+    monkeypatch,
+):
+    dataset = _write_dataset(
+        tmp_path,
+        fasta=">KEEP.1|Iris_a\nACGT\n",
+        records=[_compact_build_record("KEEP.1", "KEEP.1|Iris_a", "Iris a")],
+    )
+    old_qc = dataset / "qc"
+    old_qc.mkdir()
+    (old_qc / "qc_report.json").write_text('{"old": true}\n', encoding="utf-8")
+
+    class FailingAlignmentRunner:
+        def align(self, input_path, output_path, *, threads):
+            raise RuntimeError("mafft failed")
+
+    monkeypatch.setattr(validation_module, "AlignmentRunner", FailingAlignmentRunner)
+
+    with pytest.raises(RuntimeError, match="mafft failed"):
+        validation_module.run_qc(
+            dataset,
+            exclude=set(),
+            min_length=None,
+            max_ambiguous_content=None,
+            enable_tree_shrink_qc=True,
+            tree_shrink_config=TreeShrinkConfig(),
+        )
+
+    assert (old_qc / "qc_report.json").read_text(encoding="utf-8") == '{"old": true}\n'
+    assert list(dataset.glob(".qc-stage-*")) == []
 
 
 def test_tree_shrink_qc_validation_filters_fasta_and_updates_report(
@@ -422,3 +718,55 @@ def _build_report_entry(
         output_id=output_id,
         metadata={"marker": Marker.RBCL.value},
     )
+
+
+def _write_dataset(
+    tmp_path: Path,
+    *,
+    fasta: str,
+    records: list[dict[str, str | bool | None]],
+) -> Path:
+    dataset = tmp_path / "dataset"
+    raw_dir = dataset / "raw"
+    raw_dir.mkdir(parents=True)
+    (raw_dir / "rbcl.fasta").write_text(fasta, encoding="utf-8")
+    (dataset / "build_report.json").write_text(
+        json.dumps(records, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    (dataset / "dataset.json").write_text(
+        json.dumps(
+            {
+                "format_version": 1,
+                "marker": "rbcl",
+                "raw_fasta": "raw/rbcl.fasta",
+                "build_report": "build_report.json",
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return dataset
+
+
+def _compact_build_record(
+    accession: str,
+    sequence_id: str,
+    scientific_name: str,
+    *,
+    infraspecific_rank: str | None = None,
+    is_hybrid: bool = False,
+    is_uncertain: bool = False,
+) -> dict[str, str | bool | None]:
+    return {
+        "accession": accession,
+        "sequence_id": sequence_id,
+        "scientific_name": scientific_name,
+        "infraspecific_rank": infraspecific_rank,
+        "is_hybrid": is_hybrid,
+        "is_uncertain": is_uncertain,
+        "extraction_backend": "annotation",
+        "error": None,
+    }

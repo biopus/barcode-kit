@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
 
 from Bio.Seq import Seq
@@ -24,8 +24,6 @@ from barcode_kit.models import (
     BuildReportEntry,
     GenBankCacheRecord,
     Marker,
-    SequenceQuality,
-    TaxonExclusion,
     TaxonQuery,
     TaxonomyRecord,
 )
@@ -36,7 +34,6 @@ from barcode_kit.parser import (
     read_single_genbank,
 )
 from barcode_kit.storage import Storage
-from barcode_kit.validation import sequence_quality
 
 
 __all__ = ["build_dataset"]
@@ -48,10 +45,6 @@ def build_dataset(
     query: TaxonQuery,
     marker: Marker,
     outdir: Path,
-    *,
-    min_length: int | None = None,
-    max_ambiguous_content: float | None = None,
-    exclude: set[TaxonExclusion] | None = None,
 ) -> list[BuildReportEntry]:
     ensure_app_dirs(config)
     storage.initialize()
@@ -66,9 +59,6 @@ def build_dataset(
             candidates,
             marker,
             outdir,
-            min_length=min_length,
-            max_ambiguous_content=max_ambiguous_content,
-            exclude=exclude or set(),
         )
 
     if marker.is_coding:
@@ -77,9 +67,6 @@ def build_dataset(
             candidates,
             marker,
             outdir,
-            min_length=min_length,
-            max_ambiguous_content=max_ambiguous_content,
-            exclude=exclude or set(),
         )
 
     raise BuildError(f"unsupported marker: {marker.value}")
@@ -93,10 +80,6 @@ def _build_its_dataset(
     candidates: _CandidateRecords,
     marker: Marker,
     outdir: Path,
-    *,
-    min_length: int | None,
-    max_ambiguous_content: float | None,
-    exclude: set[TaxonExclusion],
 ) -> list[BuildReportEntry]:
     report_slots: list[BuildReportEntry | None] = []
     fasta_sequences: list[Seq | None] = []
@@ -115,13 +98,10 @@ def _build_its_dataset(
             "marker": marker.value,
             "is_hybrid": taxonomy.is_hybrid,
             "is_uncertain": taxonomy.is_uncertain,
+            "infraspecific_rank": taxonomy.infraspecific_rank,
         }
 
-        reason = _meta_info_qc(
-            path,
-            taxonomy,
-            exclude=exclude,
-        )
+        reason = _build_error(path)
         if reason is None:
             try:
                 record = read_single_genbank(path)
@@ -145,8 +125,8 @@ def _build_its_dataset(
                     )
                 )
                 continue
-            except Exception as error:
-                reason = f"GenBank parse failed: {error}"
+            except Exception:
+                reason = "genbank_parse_failed"
 
         report_slots[index] = BuildReportEntry(
             accession_version=accession_version,
@@ -181,17 +161,10 @@ def _build_its_dataset(
             metadata = dict(item.metadata)
             sequence = hmm_result.sequence
             reason = None
-            quality = None
             if sequence is not None:
                 metadata["extraction_backend"] = "itsxrust"
                 metadata["fallback_reason"] = None
-                quality, reason = _seq_quality_qc(
-                    sequence,
-                    min_length,
-                    max_ambiguous_content,
-                )
-                if reason is None:
-                    seeds.append(BlastRecord(accession_version=item.accession_version, sequence=sequence))
+                seeds.append(BlastRecord(accession_version=item.accession_version, sequence=sequence))
             else:
                 default_fallback_reason = "no_anchor_its2" if marker is Marker.ITS2 else "no_anchor_full"
                 metadata["hmm_fallback_reason"] = hmm_result.fallback_reason or default_fallback_reason
@@ -212,7 +185,7 @@ def _build_its_dataset(
                 scientific_name=item.scientific_name,
                 included=included,
                 reason=reason,
-                quality=quality,
+                quality=None,
                 output_id=f"{item.accession_version}|{item.scientific_name.replace(' ', '_')}"
                 if included
                 else None,
@@ -237,22 +210,15 @@ def _build_its_dataset(
             )
             sequence = annotation.sequence
             reason = None
-            quality = None
             if sequence is None:
-                reason = "marker not extracted"
-            else:
-                quality, reason = _seq_quality_qc(
-                    sequence,
-                    min_length,
-                    max_ambiguous_content,
-                )
+                reason = "marker_not_extracted"
             included = reason is None and sequence is not None
             entry = BuildReportEntry(
                 accession_version=item.accession_version,
                 scientific_name=item.scientific_name,
                 included=included,
                 reason=reason,
-                quality=quality,
+                quality=None,
                 output_id=f"{item.accession_version}|{item.scientific_name.replace(' ', '_')}"
                 if included
                 else None,
@@ -293,22 +259,15 @@ def _build_its_dataset(
             metadata["fallback_reason"] = result.fallback_reason
             metadata.update(result.metadata)
             reason = None
-            quality = None
             if result.sequence is None:
-                reason = "low quality sequence"
-            else:
-                quality, reason = _seq_quality_qc(
-                    result.sequence,
-                    min_length,
-                    max_ambiguous_content,
-                )
+                reason = "marker_not_extracted"
             included = reason is None and result.sequence is not None
             entry = BuildReportEntry(
                 accession_version=item.accession_version,
                 scientific_name=item.scientific_name,
                 included=included,
                 reason=reason,
-                quality=quality,
+                quality=None,
                 output_id=f"{item.accession_version}|{item.scientific_name.replace(' ', '_')}"
                 if included
                 else None,
@@ -338,44 +297,31 @@ def _build_annotation_dataset(
     candidates: _CandidateRecords,
     marker: Marker,
     outdir: Path,
-    *,
-    min_length: int | None,
-    max_ambiguous_content: float | None,
-    exclude: set[TaxonExclusion],
 ) -> list[BuildReportEntry]:
     report: list[BuildReportEntry] = []
     fasta_sequences: list[Seq | None] = []
     for cache_record, taxonomy in candidates:
         path = config.genbank_cache_dir / f"{cache_record.accession_version}.gb"
         reason: str | None = None
-        quality: SequenceQuality | None = None
         sequence: Seq | None = None
         metadata = {
             "taxon_id": taxonomy.taxon_id,
             "marker": marker.value,
             "is_hybrid": taxonomy.is_hybrid,
             "is_uncertain": taxonomy.is_uncertain,
+            "infraspecific_rank": taxonomy.infraspecific_rank,
+            "extraction_backend": "annotation",
         }
-        reason = _meta_info_qc(
-            path,
-            taxonomy,
-            exclude=exclude,
-        )
+        reason = _build_error(path)
 
         if reason is None:
             try:
                 record = read_single_genbank(path)
                 sequence = extract_marker(record, marker)
-            except Exception as error:
-                reason = f"GenBank parse failed: {error}"
+            except Exception:
+                reason = "genbank_parse_failed"
             if reason is None and sequence is None:
-                reason = "marker not extracted"
-            if reason is None and sequence is not None:
-                quality, reason = _seq_quality_qc(
-                    sequence,
-                    min_length,
-                    max_ambiguous_content,
-                )
+                reason = "marker_not_extracted"
 
         included = reason is None and sequence is not None
         entry = BuildReportEntry(
@@ -383,7 +329,7 @@ def _build_annotation_dataset(
             scientific_name=taxonomy.scientific_name,
             included=included,
             reason=reason,
-            quality=quality,
+            quality=None,
             output_id=f"{cache_record.accession_version}|{taxonomy.scientific_name.replace(' ', '_')}"
             if included
             else None,
@@ -409,38 +355,10 @@ class _ItsCandidate:
     metadata: dict[str, str | int | float | bool | None]
 
 
-def _meta_info_qc(
-    path: Path,
-    taxonomy: TaxonomyRecord,
-    *,
-    exclude: set[TaxonExclusion],
-) -> str | None:
-    if TaxonExclusion.HYBRID in exclude and taxonomy.is_hybrid:
-        return "hybrid excluded"
-    if TaxonExclusion.UNCERTAIN in exclude and taxonomy.is_uncertain:
-        return "uncertain taxon excluded"
-    rank = taxonomy.infraspecific_rank
-    if rank and TaxonExclusion.INFRASPECIFIC in exclude:
-        return "infraspecific taxon excluded"
-    if rank and rank in exclude:
-        return f"{rank} excluded"
+def _build_error(path: Path) -> str | None:
     if not path.exists():
-        return "cached GenBank file missing"
+        return "cached_file_missing"
     return None
-
-
-def _seq_quality_qc(
-    sequence: Seq,
-    min_length: int | None,
-    max_ambiguous_content: float | None,
-) -> tuple[SequenceQuality, str | None]:
-    quality = sequence_quality(sequence)
-    reason = None
-    if min_length is not None and quality.length < min_length:
-        reason = "sequence shorter than min_length"
-    if max_ambiguous_content is not None and quality.ambiguous_content > max_ambiguous_content:
-        reason = "ambiguous base content above max_ambiguous_content"
-    return quality, reason
 
 
 def _finalize_build_outputs(
@@ -454,9 +372,49 @@ def _finalize_build_outputs(
         for entry, sequence in zip(report, fasta_sequences)
         if entry.included and entry.output_id is not None and sequence is not None
     ]
-    (outdir / f"{marker.value}.fasta").write_text("".join(fasta_chunks), encoding="utf-8")
+    raw_dir = outdir / "raw"
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    raw_fasta = raw_dir / f"{marker.value}.fasta"
+    raw_fasta.write_text("".join(fasta_chunks), encoding="utf-8")
     (outdir / "build_report.json").write_text(
-        json.dumps([asdict(entry) for entry in report], ensure_ascii=False, indent=2) + "\n",
+        json.dumps([_build_report_record(entry) for entry in report], ensure_ascii=False, indent=2)
+        + "\n",
+        encoding="utf-8",
+    )
+    (outdir / "dataset.json").write_text(
+        json.dumps(
+            {
+                "format_version": 1,
+                "marker": marker.value,
+                "raw_fasta": str(raw_fasta.relative_to(outdir)),
+                "build_report": "build_report.json",
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
         encoding="utf-8",
     )
     return report
+
+
+def _build_report_record(
+    entry: BuildReportEntry,
+) -> dict[str, str | bool | None]:
+    return {
+        "accession": entry.accession_version,
+        "sequence_id": entry.output_id,
+        "scientific_name": entry.scientific_name,
+        "infraspecific_rank": _string_metadata(entry, "infraspecific_rank"),
+        "is_hybrid": bool(entry.metadata.get("is_hybrid", False)),
+        "is_uncertain": bool(entry.metadata.get("is_uncertain", False)),
+        "extraction_backend": (
+            _string_metadata(entry, "extraction_backend") if entry.included else None
+        ),
+        "error": entry.reason,
+    }
+
+
+def _string_metadata(entry: BuildReportEntry, key: str) -> str | None:
+    value = entry.metadata.get(key)
+    return value if isinstance(value, str) else None

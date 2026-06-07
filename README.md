@@ -88,7 +88,7 @@ uv run barcode-kit sync --family Iridaceae --marker matk
 
 同步命令会输出 JSON，包含远端命中数、下载数、跳过数、更新数和失败条目。
 
-### 构建 FASTA 数据集
+### 构建原始 FASTA 数据集
 
 ```bash
 uv run barcode-kit build --genus Iris --marker rbcl --outdir ./out
@@ -101,24 +101,23 @@ uv run barcode-kit build --genus Iris --marker rbcl --outdir ./out
 uv run barcode-kit build --kingdom Viridiplantae --genus Iris --marker rbcl --outdir ./out
 ```
 
-可在构建时应用质量和 taxonomy 过滤：
+`build` 只负责从本地缓存提取 marker，不应用 taxonomy 或序列质量过滤。输出目录可直接传给 `qc`：
 
 ```bash
-uv run barcode-kit build --kingdom Viridiplantae --genus Iris --marker rbcl \
+uv run barcode-kit qc --dataset ./out \
   --min-length 500 \
-  --max-ambiguous-content 0.05 \
+  --max-ambiguous 0.05 \
   --exclude hybrid \
   --exclude uncertain \
-  --exclude variety \
-  --outdir ./out
+  --exclude variety
 ```
 
-如需在构建后用 TreeShrink 去除长枝异常序列，可显式开启系统发育质控。使用前需确保 `mafft`、`iqtree` 和 `run_treeshrink.py` 已安装并可在 `PATH` 中找到。该流程固定使用 IQ-TREE `-m MFP -T AUTO` 建树，并以 TreeShrink `per-gene` 模式检测异常序列：
+每个 QC 选项可以单独使用，也可以组合使用。每次执行都从 `raw/` 中的原始 FASTA 开始，不继承上一次 QC 结果；未指定任何 QC 选项时命令会报错。
+
+如需使用 TreeShrink 去除长枝异常序列，需确保 `mafft`、`iqtree` 和 `run_treeshrink.py` 已安装并可在 `PATH` 中找到。该流程固定使用 IQ-TREE `-m MFP -T AUTO` 建树，并以 TreeShrink `per-gene` 模式检测异常序列：
 
 ```bash
-uv run barcode-kit build --genus Iris --marker rbcl \
-  --tree-shrink-qc \
-  --outdir ./out
+uv run barcode-kit qc --dataset ./out --tree-shrink-qc
 ```
 
 TreeShrink 的 `-k` 上限通过 `build.tree_shrink_qc.max_removed` 配置。默认值为 `auto-select`，表示沿用 TreeShrink 根据数据自动选择的上限；需要更激进时可设置为正整数，例如：
@@ -130,8 +129,11 @@ max_removed = 6
 
 输出目录中会生成：
 
-- `<marker>.fasta`：构建出的 FASTA 数据集。
-- `build_report.json`：每条候选记录的纳入状态、排除原因和质量指标。
+- `dataset.json`：数据集格式、marker 和文件位置。
+- `raw/<marker>.fasta`：未经用户 QC 过滤的原始数据集。
+- `build_report.json`：每条候选记录的提取结果和必要 taxonomy 标记。
+- `qc/<marker>.fasta`：最近一次 QC 的输出。
+- `qc/qc_report.json`：最近一次 QC 的选项、指标和排除原因。
 
 ### 系统发育分析 Python API
 
@@ -171,8 +173,6 @@ run_tree_shrink_qc(
     tree_shrink_runner=SubprocessTreeShrinkRunner(),
 )
 ```
-
-`build_dataset()` 也可以通过 `enable_tree_shrink_qc=True` 显式开启 TreeShrink 质控，质控参数来自 `AppConfig.tree_shrink_qc` 中的 `TreeShrinkConfig`。开启后会先输出候选 FASTA 到临时工作目录，依次运行 MAFFT、IQ-TREE 和 TreeShrink，再把 TreeShrink 标记的异常序列从最终 `<marker>.fasta` 中删除，并在 `build_report.json` 中记录排除原因。
 
 ### 查看本地缓存
 
@@ -224,6 +224,7 @@ src/barcode_kit/
   parser.py       GenBank 记录解析与 marker 检测
   storage.py      SQLite schema 与查询
   builder.py      FASTA 构建与报告生成
+  validation.py   数据集 QC 与质量指标
   models.py       领域模型
 
 tests/            pytest 测试

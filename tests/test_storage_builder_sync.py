@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import json
 from pathlib import Path
 
 from Bio import SeqIO
@@ -24,7 +25,6 @@ from barcode_kit.models import (
     GenBankCacheRecord,
     Marker,
     TaxonConstraint,
-    TaxonExclusion,
     TaxonQuery,
     TaxonomyRecord,
 )
@@ -148,7 +148,10 @@ def test_sync_adds_lineage_constraints_to_ncbi_search_term(tmp_path: Path):
     assert client.search_terms == ["Iris[Organism] AND Viridiplantae[Organism] AND rbcl"]
 
 
-def test_build_dataset_exports_fasta_and_report(tmp_path: Path, genbank_text):
+def test_build_dataset_exports_raw_dataset_manifest_and_compact_report(
+    tmp_path: Path,
+    genbank_text,
+):
     config = _config(tmp_path)
     storage = Storage(config.database_path)
     service = SyncService(
@@ -166,17 +169,32 @@ def test_build_dataset_exports_fasta_and_report(tmp_path: Path, genbank_text):
         TaxonQuery("genus", "Iris"),
         Marker.RBCL,
         outdir,
-        min_length=500,
-        max_ambiguous_content=0.05,
     )
 
     assert len(report) == 1
     assert report[0].included is True
-    assert "PP476489.4|Iris_japonica" in (outdir / "rbcl.fasta").read_text()
-    assert (outdir / "build_report.json").exists()
+    assert "PP476489.4|Iris_japonica" in (outdir / "raw" / "rbcl.fasta").read_text()
+    assert json.loads((outdir / "dataset.json").read_text(encoding="utf-8")) == {
+        "format_version": 1,
+        "marker": "rbcl",
+        "raw_fasta": "raw/rbcl.fasta",
+        "build_report": "build_report.json",
+    }
+    assert json.loads((outdir / "build_report.json").read_text(encoding="utf-8")) == [
+        {
+            "accession": "PP476489.4",
+            "sequence_id": "PP476489.4|Iris_japonica",
+            "scientific_name": "Iris japonica",
+            "infraspecific_rank": None,
+            "is_hybrid": False,
+            "is_uncertain": False,
+            "extraction_backend": "annotation",
+            "error": None,
+        }
+    ]
 
 
-def test_build_dataset_excludes_records_above_max_ambiguous_content(
+def test_build_dataset_keeps_ambiguous_sequences_for_later_qc(
     tmp_path: Path,
     genbank_text,
 ):
@@ -196,17 +214,16 @@ def test_build_dataset_excludes_records_above_max_ambiguous_content(
         TaxonQuery("genus", "Iris"),
         Marker.RBCL,
         tmp_path / "out",
-        max_ambiguous_content=0.25,
     )
 
     assert len(report) == 1
-    assert report[0].included is False
-    assert report[0].reason == "ambiguous base content above max_ambiguous_content"
-    assert report[0].quality is not None
-    assert report[0].quality.ambiguous_content == 0.5
+    assert report[0].included is True
+    assert report[0].reason is None
+    assert report[0].quality is None
+    assert "ACGTNNRY" in (tmp_path / "out" / "raw" / "rbcl.fasta").read_text()
 
 
-def test_build_dataset_excludes_selected_infraspecific_rank(tmp_path: Path, genbank_text):
+def test_build_dataset_keeps_infraspecific_records_for_later_qc(tmp_path: Path, genbank_text):
     config = _config(tmp_path)
     storage = Storage(config.database_path)
     storage.initialize()
@@ -256,13 +273,16 @@ def test_build_dataset_excludes_selected_infraspecific_rank(tmp_path: Path, genb
         TaxonQuery("genus", "Iris"),
         Marker.RBCL,
         tmp_path / "out",
-        exclude={TaxonExclusion.VARIETY},
     )
 
     by_accession = {entry.accession_version: entry for entry in report}
-    assert by_accession["VAR000001.1"].included is False
-    assert by_accession["VAR000001.1"].reason == "variety excluded"
+    assert by_accession["VAR000001.1"].included is True
     assert by_accession["SPC000001.1"].included is True
+    build_report = json.loads(
+        (tmp_path / "out" / "build_report.json").read_text(encoding="utf-8")
+    )
+    report_by_accession = {entry["accession"]: entry for entry in build_report}
+    assert report_by_accession["VAR000001.1"]["infraspecific_rank"] == "variety"
 
 
 def test_build_dataset_exports_raw_records_without_treeshrink_qc(
@@ -295,7 +315,7 @@ def test_build_dataset_exports_raw_records_without_treeshrink_qc(
     assert len(report) == 2
     assert report[0].included is True
     assert report[1].included is True
-    fasta_text = (tmp_path / "out" / "rbcl.fasta").read_text(encoding="utf-8")
+    fasta_text = (tmp_path / "out" / "raw" / "rbcl.fasta").read_text(encoding="utf-8")
     assert "PP476489.4|Iris_japonica" in fasta_text
     assert "PP476490.1|Iris_japonica" in fasta_text
 
@@ -340,7 +360,7 @@ def test_build_its_uses_annotation_when_all_itsxrust_extractions_fail(
     assert itsxrust_runner.extract_many_calls == 1
     assert len(report) == 1
     assert report[0].included is False
-    assert report[0].reason == "marker not extracted"
+    assert report[0].reason == "marker_not_extracted"
     assert report[0].metadata["extraction_backend"] == "annotation"
     assert report[0].metadata["hmm_fallback_reason"] == "hmm_failed"
     assert report[0].metadata["fallback_reason"] is None
@@ -418,11 +438,15 @@ def test_build_its_rescues_failed_itsxrust_record_with_seed(
     assert report[1].metadata["extraction_backend"] == "blastn"
     assert report[1].metadata["fallback_reason"] is None
     assert report[1].metadata["blast_seed_accession"] == "ITS000001.1"
-    assert "ITS000001.1|Iris_japonica" in (tmp_path / "out" / "its.fasta").read_text()
-    assert "ITS000002.1|Iris_japonica" in (tmp_path / "out" / "its.fasta").read_text()
+    assert "ITS000001.1|Iris_japonica" in (
+        tmp_path / "out" / "raw" / "its.fasta"
+    ).read_text()
+    assert "ITS000002.1|Iris_japonica" in (
+        tmp_path / "out" / "raw" / "its.fasta"
+    ).read_text()
 
 
-def test_build_its_marks_unrescued_partial_itsxrust_failures_low_quality(
+def test_build_its_marks_unrescued_partial_itsxrust_failures_as_extraction_errors(
     tmp_path: Path,
     monkeypatch,
 ):
@@ -451,7 +475,7 @@ def test_build_its_marks_unrescued_partial_itsxrust_failures_low_quality(
     assert len(report) == 2
     assert report[0].included is True
     assert report[1].included is False
-    assert report[1].reason == "low quality sequence"
+    assert report[1].reason == "marker_not_extracted"
     assert report[1].metadata["extraction_backend"] == "blastn"
     assert report[1].metadata["fallback_reason"] == "no_blast_hit"
 
@@ -512,7 +536,7 @@ def test_build_its_all_itsxrust_failures_use_annotation_without_blast(
     assert report[0].metadata["extraction_backend"] == "annotation"
     assert report[0].metadata["hmm_fallback_reason"] == "hmm_failed"
     assert report[1].included is False
-    assert report[1].reason == "marker not extracted"
+    assert report[1].reason == "marker_not_extracted"
     assert report[1].metadata["extraction_backend"] == "annotation"
 
 
